@@ -33,31 +33,30 @@ function modelFor(kind: "writing" | "routing" | undefined): "claude-sonnet-4-6" 
 
 export async function claude<T = string>(call: ClaudeCall): Promise<ClaudeResult<T>> {
   const model = modelFor(call.model);
-  // For JSON calls, prepend an assistant turn opening with `{` — Anthropic's
-  // documented technique to force the response to start with valid JSON and
-  // avoid prose preambles.
   const wantsJson = !!call.json;
-  const messages: Anthropic.MessageParam[] = [
-    { role: "user", content: call.user },
-  ];
-  if (wantsJson) {
-    messages.push({ role: "assistant", content: "{" });
-  }
+
+  // For JSON requests, append a strong reminder to the user turn instead of
+  // using an assistant-message prefill. Some Claude variants (notably the
+  // newer extended-thinking models) reject prefill with:
+  //   "This model does not support assistant message prefill. The
+  //    conversation must end with a user message."
+  // The reminder + the robust extractor below give us the same reliability
+  // without the API restriction.
+  const userContent = wantsJson
+    ? call.user +
+      "\n\nReturn ONLY the JSON object — no markdown fences, no preamble, no commentary. Start the response with `{` and end with `}`."
+    : call.user;
 
   const res = await client().messages.create({
     model,
     max_tokens: call.maxTokens ?? 4096,
     system: call.system,
-    messages,
+    messages: [{ role: "user", content: userContent }],
   });
-  let text = res.content
+  const text = res.content
     .filter((b): b is Anthropic.TextBlock => b.type === "text")
     .map((b) => b.text)
     .join("\n");
-
-  // Anthropic does NOT echo the assistant prefill in the response, so we
-  // re-add the leading `{` for JSON parsing.
-  if (wantsJson) text = "{" + text;
 
   const inTok = res.usage.input_tokens;
   const outTok = res.usage.output_tokens;
@@ -90,9 +89,10 @@ export async function claude<T = string>(call: ClaudeCall): Promise<ClaudeResult
 }
 
 // Robust JSON extraction tried in order, easiest → most defensive:
-//   1. Direct parse (assistant prefill of `{` usually makes this work)
+//   1. Direct parse (succeeds when Claude follows the "JSON only" reminder)
 //   2. Stripped ```json fences
-//   3. First balanced `{...}` or `[...]` substring
+//   3. First balanced `{...}` or `[...]` substring (escape-aware,
+//      ignores braces inside string literals)
 // Returns undefined if nothing parsable was found.
 function tryParseJson<T>(text: string): T | undefined {
   const candidates = [
