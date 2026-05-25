@@ -2,17 +2,24 @@ import { prisma, Prompts, logger, type Prisma } from "@ca/shared";
 import { claude, generateImage } from "@ca/providers";
 import { bumpCost, loadBrandContext, makeSlug, markTopicUsed, setStatus, unusedTopicFor } from "./util.js";
 import { routeApproval } from "./route.js";
+import type { SeoBundle } from "./seo.js";
 
-// Full blog pipeline: research → outline → draft → media → self-critique → route.
+// Full blog pipeline: research → outline (with SEO) → draft → media → critique → route.
 // Each step persists progress so a worker restart resumes cleanly.
 
 export interface BlogOutline {
   title: string;
   slug: string;
+  metaTitle: string;
+  metaDescription: string;
   excerpt: string;
+  focusKeyword: string;
+  keywords: string[];
   tags: string[];
   sections: Array<{ h2: string; bullets: string[] }>;
-  imagePrompts: string[];
+  imagePrompts: Array<{ prompt: string; alt: string }>;
+  internalLinkSuggestions: Array<{ anchor: string; path: string }>;
+  faq: Array<{ q: string; a: string }>;
 }
 
 export async function runBlogPipeline(contentItemId: string): Promise<void> {
@@ -35,12 +42,12 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
     });
   }
 
-  // 2. Outline
+  // 2. Outline (carries SEO fields)
   await setStatus(contentItemId, "drafting");
   const outlineRes = await claude<BlogOutline>({
     model: "writing",
     json: true,
-    maxTokens: 2048,
+    maxTokens: 2400,
     system: Prompts.BLOG_OUTLINE_SYSTEM,
     user: Prompts.blogOutlineUser(topicTitle, brandBlock),
   });
@@ -49,6 +56,17 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
 
   const outline = outlineRes.json;
   const slug = makeSlug(outline.slug || outline.title);
+
+  const seo: SeoBundle = {
+    metaTitle: outline.metaTitle ?? null,
+    metaDescription: outline.metaDescription ?? null,
+    excerpt: outline.excerpt ?? null,
+    focusKeyword: outline.focusKeyword ?? null,
+    keywords: outline.keywords ?? [],
+    ogImageAlt: outline.imagePrompts?.[0]?.alt ?? null,
+    faq: outline.faq ?? [],
+    internalLinkSuggestions: outline.internalLinkSuggestions ?? [],
+  };
 
   await prisma.contentItem.update({
     where: { id: contentItemId },
@@ -60,6 +78,7 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
         outline: outline as unknown as Prisma.InputJsonValue,
         excerpt: outline.excerpt,
         tags: outline.tags,
+        seo: seo as unknown as Prisma.InputJsonValue,
       } as Prisma.InputJsonValue,
     },
   });
@@ -77,14 +96,14 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
     data: { bodyMd: draftRes.text },
   });
 
-  // 4. Images (hero + inline)
+  // 4. Images (hero + inline) — capture alt text per image
   await setStatus(contentItemId, "generating_media");
   const imagePrompts = (outline.imagePrompts ?? []).slice(0, 3);
-  for (const [i, prompt] of imagePrompts.entries()) {
+  for (const [i, ip] of imagePrompts.entries()) {
     try {
       const img = await generateImage({
-        prompt,
-        quality: i === 0 ? "high" : "medium", // hero is high, inline medium
+        prompt: ip.prompt,
+        quality: i === 0 ? "high" : "medium",
         businessSlug: business.slug,
         filenameHint: `${slug}-${i + 1}`,
       });
@@ -95,17 +114,19 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
           kind: "image",
           path: img.relPath,
           provider: "openai_image",
-          prompt,
+          prompt: ip.prompt,
+          altText: ip.alt ?? null,
+          ord: i, // 0 = hero/OG image
           costUsd: img.costUsd,
         },
       });
       await bumpCost(contentItemId, img.costUsd);
     } catch (err) {
-      logger.error({ err, prompt }, "blog.image_failed");
+      logger.error({ err, prompt: ip.prompt }, "blog.image_failed");
     }
   }
 
-  // 5. Self-critique (only when approvalMode = ai_review; route decides)
+  // 5. Self-critique → route
   await setStatus(contentItemId, "self_critique");
   await routeApproval(contentItemId);
 }

@@ -258,6 +258,10 @@ model Asset {
   path          String      // /app/assets/{businessSlug}/{kind}/{uuid}.{ext}
   provider      String      // openai_image | elevenlabs | heygen | canva | local
   prompt        String      @default("")
+  // Alt text for accessibility + image SEO. Generated alongside the asset.
+  altText       String?
+  // 0 = primary/cover; >0 = inline order. Used to render the canonical OG image.
+  ord           Int         @default(0)
   meta          Json        @default("{}")
   costUsd       Float       @default(0)
   createdAt     DateTime    @default(now())
@@ -356,6 +360,20 @@ model AuditLog {
 // Keeping them in separate tables means client sites query a clean, narrow
 // schema and never accidentally serve drafts.
 
+// ── SEO fields are repeated across published tables (rather than a single
+//    "Seo" model) so client sites can `select` everything needed for a page
+//    in a single round-trip with no joins. Columns:
+//      metaTitle        — <title> tag override (≤60 chars)
+//      metaDescription  — meta + og:description (≤155 chars)
+//      keywords         — string[] for legacy meta keywords + topic clustering
+//      focusKeyword     — primary SEO target the draft was optimized for
+//      ogImagePath      — relative asset path used for og:image / twitter:image
+//      ogImageAlt       — alt text matched to ogImagePath
+//      readingMinutes   — computed from word count for UX + structured data
+//      canonicalPath    — site-relative canonical when different from default
+//      authorName       — schema.org/Person.name used in JSON-LD
+//      authorUrl        — schema.org/Person.url (optional)
+
 model Post {
   id             String   @id @default(cuid())
   businessId     String
@@ -369,6 +387,19 @@ model Post {
   coverImagePath String?
   tags           String[] @default([])
   publishedAt    DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // ── SEO ─────────────────────────────────────────────────────────────
+  metaTitle       String?
+  metaDescription String?
+  keywords        String[] @default([])
+  focusKeyword    String?
+  ogImagePath     String?
+  ogImageAlt      String?
+  readingMinutes  Int?
+  canonicalPath   String?
+  authorName      String?
+  authorUrl       String?
 
   @@unique([businessId, slug])
   @@index([businessId, publishedAt])
@@ -387,6 +418,19 @@ model CaseStudy {
   bodyMd         String
   coverImagePath String?
   publishedAt    DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // ── SEO ─────────────────────────────────────────────────────────────
+  metaTitle       String?
+  metaDescription String?
+  keywords        String[] @default([])
+  focusKeyword    String?
+  ogImagePath     String?
+  ogImageAlt      String?
+  readingMinutes  Int?
+  canonicalPath   String?
+  authorName      String?
+  authorUrl       String?
 
   @@unique([businessId, slug])
   @@index([businessId, publishedAt])
@@ -405,6 +449,19 @@ model Resource {
   downloadPath   String?
   coverImagePath String?
   publishedAt    DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // ── SEO ─────────────────────────────────────────────────────────────
+  metaTitle       String?
+  metaDescription String?
+  keywords        String[] @default([])
+  focusKeyword    String?
+  ogImagePath     String?
+  ogImageAlt      String?
+  readingMinutes  Int?
+  canonicalPath   String?
+  authorName      String?
+  authorUrl       String?
 
   @@unique([businessId, slug])
   @@index([businessId, publishedAt])
@@ -421,9 +478,19 @@ model LandingPage {
   // Structured sections rendered by the site's <LandingPage> component:
   // [{ kind: "hero", props: {...} }, { kind: "features", props: {...} }, …]
   sections       Json
-  metaTitle      String?
-  metaDescription String?
   publishedAt    DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // ── SEO ─────────────────────────────────────────────────────────────
+  // LandingPage carried metaTitle/metaDescription from v1; the others are
+  // added here for parity with Post/CaseStudy/Resource.
+  metaTitle       String?
+  metaDescription String?
+  keywords        String[] @default([])
+  focusKeyword    String?
+  ogImagePath     String?
+  ogImageAlt      String?
+  canonicalPath   String?
 
   @@unique([businessId, slug])
   @@index([businessId, publishedAt])

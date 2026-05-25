@@ -1,6 +1,7 @@
 import { prisma, logger } from "@ca/shared";
 import { schedulePost } from "@ca/providers";
 import { setStatus } from "./util.js";
+import { publishedSeo, type SeoBundle, emptySeo } from "./seo.js";
 
 // Materializes an approved ContentItem into the typed published table the
 // client website reads from. Idempotent — re-running publishes the same row.
@@ -8,7 +9,7 @@ import { setStatus } from "./util.js";
 export async function publishContentItem(contentItemId: string): Promise<void> {
   const item = await prisma.contentItem.findUniqueOrThrow({
     where: { id: contentItemId },
-    include: { assets: true },
+    include: { assets: { orderBy: { ord: "asc" } } },
   });
   if (item.status !== "approved") {
     logger.warn({ id: contentItemId, status: item.status }, "publish.skipped_not_approved");
@@ -42,11 +43,36 @@ export async function publishContentItem(contentItemId: string): Promise<void> {
   }
 }
 
-type Item = Awaited<ReturnType<typeof prisma.contentItem.findUniqueOrThrow>> & { assets: Array<{ kind: string; path: string }> };
+type Item = Awaited<ReturnType<typeof prisma.contentItem.findUniqueOrThrow>> & {
+  assets: Array<{ kind: string; path: string; altText: string | null; ord: number }>;
+};
+
+// Pull the SEO bundle out of ContentItem.meta.seo (set by the pipelines).
+function extractSeo(item: Item): SeoBundle {
+  const meta = (item.meta ?? {}) as { seo?: SeoBundle };
+  return meta.seo ?? emptySeo();
+}
+
+// Find the canonical cover image — ord=0 image if present.
+function coverFor(item: Item): { path: string | null; alt: string | null } {
+  const image = item.assets.find((a) => a.kind === "image" && a.ord === 0) ?? item.assets.find((a) => a.kind === "image");
+  return { path: image?.path ?? null, alt: image?.altText ?? null };
+}
 
 async function publishBlog(item: Item) {
   const meta = (item.meta ?? {}) as { excerpt?: string; tags?: string[] };
-  const cover = item.assets.find((a) => a.kind === "image");
+  const cover = coverFor(item);
+  const seo = extractSeo(item);
+  const seoFields = publishedSeo({
+    seo,
+    fallbackTitle: item.title,
+    body: item.bodyMd,
+    coverImagePath: cover.path,
+    includeReadingMinutes: true,
+  });
+  // If the asset doesn't already carry alt, fall back to the OG alt the AI proposed.
+  if (!seoFields.ogImageAlt && cover.alt) seoFields.ogImageAlt = cover.alt;
+
   await prisma.post.upsert({
     where: { contentItemId: item.id },
     create: {
@@ -54,17 +80,19 @@ async function publishBlog(item: Item) {
       contentItemId: item.id,
       slug: item.slug ?? item.id,
       title: item.title,
-      excerpt: meta.excerpt ?? "",
+      excerpt: seo.excerpt ?? meta.excerpt ?? "",
       bodyMd: item.bodyMd,
-      coverImagePath: cover?.path,
+      coverImagePath: cover.path,
       tags: meta.tags ?? [],
+      ...seoFields,
     },
     update: {
       title: item.title,
-      excerpt: meta.excerpt ?? "",
+      excerpt: seo.excerpt ?? meta.excerpt ?? "",
       bodyMd: item.bodyMd,
-      coverImagePath: cover?.path,
+      coverImagePath: cover.path,
       tags: meta.tags ?? [],
+      ...seoFields,
     },
   });
 }
@@ -72,7 +100,17 @@ async function publishBlog(item: Item) {
 async function publishCaseStudy(item: Item) {
   const intake = await prisma.caseStudyIntake.findUnique({ where: { contentItemId: item.id } });
   if (!intake) throw new Error("publishCaseStudy: missing intake");
-  const cover = item.assets.find((a) => a.kind === "image");
+  const cover = coverFor(item);
+  const seo = extractSeo(item);
+  const seoFields = publishedSeo({
+    seo,
+    fallbackTitle: item.title,
+    body: item.bodyMd,
+    coverImagePath: cover.path,
+    includeReadingMinutes: true,
+  });
+  if (!seoFields.ogImageAlt && cover.alt) seoFields.ogImageAlt = cover.alt;
+
   await prisma.caseStudy.upsert({
     where: { contentItemId: item.id },
     create: {
@@ -83,21 +121,33 @@ async function publishCaseStudy(item: Item) {
       clientName: intake.clientName,
       metric: intake.metric,
       bodyMd: item.bodyMd,
-      coverImagePath: cover?.path,
+      coverImagePath: cover.path,
+      ...seoFields,
     },
     update: {
       title: item.title,
       clientName: intake.clientName,
       metric: intake.metric,
       bodyMd: item.bodyMd,
-      coverImagePath: cover?.path,
+      coverImagePath: cover.path,
+      ...seoFields,
     },
   });
 }
 
 async function publishResource(item: Item) {
   const meta = (item.meta ?? {}) as { kind?: string; downloadPath?: string };
-  const cover = item.assets.find((a) => a.kind === "image");
+  const cover = coverFor(item);
+  const seo = extractSeo(item);
+  const seoFields = publishedSeo({
+    seo,
+    fallbackTitle: item.title,
+    body: item.bodyMd,
+    coverImagePath: cover.path,
+    includeReadingMinutes: true,
+  });
+  if (!seoFields.ogImageAlt && cover.alt) seoFields.ogImageAlt = cover.alt;
+
   await prisma.resource.upsert({
     where: { contentItemId: item.id },
     create: {
@@ -108,20 +158,34 @@ async function publishResource(item: Item) {
       kind: meta.kind ?? "guide",
       bodyMd: item.bodyMd,
       downloadPath: meta.downloadPath,
-      coverImagePath: cover?.path,
+      coverImagePath: cover.path,
+      ...seoFields,
     },
     update: {
       title: item.title,
       kind: meta.kind ?? "guide",
       bodyMd: item.bodyMd,
       downloadPath: meta.downloadPath,
-      coverImagePath: cover?.path,
+      coverImagePath: cover.path,
+      ...seoFields,
     },
   });
 }
 
 async function publishLandingPage(item: Item) {
-  const meta = (item.meta ?? {}) as { metaTitle?: string; metaDescription?: string; sections?: unknown };
+  const meta = (item.meta ?? {}) as { sections?: unknown };
+  const cover = coverFor(item);
+  const seo = extractSeo(item);
+  // LandingPage doesn't carry readingMinutes/authorName.
+  const seoFields = publishedSeo({
+    seo,
+    fallbackTitle: item.title,
+    coverImagePath: cover.path,
+    includeReadingMinutes: false,
+  });
+  if (!seoFields.ogImageAlt && cover.alt) seoFields.ogImageAlt = cover.alt;
+  const { readingMinutes: _r, authorName: _an, authorUrl: _au, ...lpSeoFields } = seoFields;
+
   await prisma.landingPage.upsert({
     where: { contentItemId: item.id },
     create: {
@@ -130,14 +194,12 @@ async function publishLandingPage(item: Item) {
       slug: item.slug ?? item.id,
       title: item.title,
       sections: (meta.sections as object) ?? [],
-      metaTitle: meta.metaTitle ?? null,
-      metaDescription: meta.metaDescription ?? null,
+      ...lpSeoFields,
     },
     update: {
       title: item.title,
       sections: (meta.sections as object) ?? [],
-      metaTitle: meta.metaTitle ?? null,
-      metaDescription: meta.metaDescription ?? null,
+      ...lpSeoFields,
     },
   });
 }

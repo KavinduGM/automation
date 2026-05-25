@@ -1,4 +1,5 @@
 export * from "./util.js";
+export * from "./seo.js";
 export * from "./research.js";
 export * from "./route.js";
 export * from "./publish.js";

@@ -8,6 +8,9 @@ interface LpJson {
   slug: string;
   metaTitle: string;
   metaDescription: string;
+  focusKeyword: string;
+  keywords: string[];
+  ogImageAlt: string;
   sections: Array<{ kind: string; props: Record<string, unknown> }>;
 }
 
@@ -38,9 +41,14 @@ export async function runLandingPagePipeline(contentItemId: string): Promise<voi
       bodyMd: "", // LPs are JSON-driven
       meta: {
         ...meta,
-        metaTitle: res.json.metaTitle,
-        metaDescription: res.json.metaDescription,
         sections: res.json.sections as unknown as Prisma.InputJsonValue,
+        seo: {
+          metaTitle: res.json.metaTitle,
+          metaDescription: res.json.metaDescription,
+          focusKeyword: res.json.focusKeyword,
+          keywords: res.json.keywords ?? [],
+          ogImageAlt: res.json.ogImageAlt ?? null,
+        } as unknown as Prisma.InputJsonValue,
       } as Prisma.InputJsonValue,
     },
   });
@@ -57,7 +65,17 @@ export async function runLandingPagePipeline(contentItemId: string): Promise<voi
       filenameHint: `lp-${slug}`,
     });
     await prisma.asset.create({
-      data: { businessId: business.id, contentItemId, kind: "image", path: img.relPath, provider: "openai_image", prompt: "lp hero", costUsd: img.costUsd },
+      data: {
+        businessId: business.id,
+        contentItemId,
+        kind: "image",
+        path: img.relPath,
+        provider: "openai_image",
+        prompt: "lp hero",
+        altText: res.json.ogImageAlt ?? heroText,
+        ord: 0,
+        costUsd: img.costUsd,
+      },
     });
     await bumpCost(contentItemId, img.costUsd);
   } catch { /* non-fatal */ }

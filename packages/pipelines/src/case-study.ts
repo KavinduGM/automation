@@ -1,7 +1,8 @@
-import { prisma, Prompts } from "@ca/shared";
+import { prisma, Prompts, type Prisma } from "@ca/shared";
 import { claude, generateImage } from "@ca/providers";
 import { bumpCost, loadBrandContext, makeSlug, setStatus } from "./util.js";
 import { routeApproval } from "./route.js";
+import type { SeoBundle } from "./seo.js";
 
 // Case study expects a CaseStudyIntake row already linked to the ContentItem.
 // (The dashboard creates the item + intake together via the intake form.)
@@ -27,7 +28,31 @@ export async function runCaseStudyPipeline(contentItemId: string): Promise<void>
     data: { title, slug: makeSlug(title), bodyMd: draft.text },
   });
 
-  // Cover image
+  // SEO finalization (cheap Haiku pass on the finished draft)
+  const seoRes = await claude<SeoBundle>({
+    model: "routing",
+    json: true,
+    maxTokens: 1024,
+    system: Prompts.CASE_STUDY_SEO_SYSTEM,
+    user: Prompts.caseStudySeoUser(brandBlock, draft.text, intake),
+  });
+  await bumpCost(contentItemId, seoRes.costUsd);
+  const seo: SeoBundle = seoRes.json ?? {
+    metaTitle: title, metaDescription: intake.metric, excerpt: intake.metric,
+    focusKeyword: intake.clientName, keywords: [], ogImageAlt: null,
+  };
+  await prisma.contentItem.update({
+    where: { id: contentItemId },
+    data: {
+      meta: {
+        ...(item.meta as object),
+        seo: seo as unknown as Prisma.InputJsonValue,
+        excerpt: seo.excerpt,
+      } as Prisma.InputJsonValue,
+    },
+  });
+
+  // Cover image — uses the SEO-derived alt so accessibility + OG agree
   await setStatus(contentItemId, "generating_media");
   try {
     const img = await generateImage({
@@ -37,7 +62,17 @@ export async function runCaseStudyPipeline(contentItemId: string): Promise<void>
       filenameHint: `case-${item.id}`,
     });
     await prisma.asset.create({
-      data: { businessId: business.id, contentItemId, kind: "image", path: img.relPath, provider: "openai_image", prompt: "case study cover", costUsd: img.costUsd },
+      data: {
+        businessId: business.id,
+        contentItemId,
+        kind: "image",
+        path: img.relPath,
+        provider: "openai_image",
+        prompt: "case study cover",
+        altText: seo.ogImageAlt ?? `${intake.clientName} — ${intake.metric}`,
+        ord: 0,
+        costUsd: img.costUsd,
+      },
     });
     await bumpCost(contentItemId, img.costUsd);
   } catch { /* non-fatal */ }
