@@ -40,7 +40,10 @@ function headers(): Record<string, string> {
 }
 
 export async function planItem(input: YtPlanItemInput): Promise<YtPlanItemResult> {
-  const res = await fetch(`${base()}/api/items`, {
+  // The YT app exposes service-to-service endpoints under /automation/*
+  // (separate plugin with bearer-token auth; cookie-session routes live
+  // under /items and are not intended for cross-service calls).
+  const res = await fetch(`${base()}/automation/items`, {
     method: "POST",
     headers: headers(),
     body: JSON.stringify({

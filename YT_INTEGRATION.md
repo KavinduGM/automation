@@ -1,160 +1,71 @@
-# YouTube Automation integration — patch instructions
+# YouTube Automation integration
 
-The Content Automation system calls the existing YouTube Automation project
-(`/Users/kavindugamlath/Desktop/YouTube Automation`) over HTTP to schedule
-webinar uploads. The YT app already has all the publishing logic — it just
-needs two small additions so service-to-service requests work without a
-browser session:
+> **Status: already implemented in the YT project.**
+> Commit `501a9e1` on
+> [`KavinduGM/YouTube_automation`](https://github.com/KavinduGM/YouTube_automation)
+> adds the `/automation/*` routes referenced below. You don't need to
+> hand-patch anything — just pull and redeploy that project after setting
+> `AUTOMATION_BEARER`.
 
-1. A **bearer-token middleware** so calls authenticate via `Authorization`
-   header (not the existing email-based session cookies).
-2. A **`POST /api/items`** route that creates a `planned` item from JSON.
+## What was added on the YT side
 
-Apply these two edits to the YT project, redeploy it, and the integration
-works.
+- `apps/api/src/routes/automation.ts` — new Fastify plugin mounted at
+  `/automation/*`, with its own bearer-token auth hook scoped to this
+  plugin only (existing cookie-session routes under `/items`, `/auth`,
+  etc. are untouched).
+- `POST /automation/items` — creates a planned `ContentItem` from JSON;
+  the existing detection → Drive-match → upload pipeline takes over from
+  there.
+- `GET  /automation/ping` — liveness probe (bearer-protected).
+- `AUTOMATION_BEARER` added to `packages/shared/src/env.ts` (optional;
+  when unset, every `/automation/*` route returns 503).
+- `AUTOMATION_BEARER: ${AUTOMATION_BEARER:-}` added to the `api` service
+  in `docker-compose.yml`.
+
+Channel resolution uses the existing `Channel.filenamePrefix` column
+(e.g. `OAP` / `OAG` / `NUR`), so **no schema change is required**.
+Source traceability is written to a `ContentEvent` row of type
+`created_by_automation`.
 
 ---
 
-## 1. Add the bearer token to YT's env
+## Deploy steps
 
-In the YT project's `.env`:
+### 1. Set the bearer token on both sides
+
+Generate one shared token:
 
 ```bash
-AUTOMATION_BEARER=$(openssl rand -hex 32)
+openssl rand -hex 32
 ```
 
-Add the same value to **this** project's `.env`:
+In the **YouTube Automation** `.env` (or Dokploy env tab):
 
 ```bash
-YT_AUTOMATION_API_TOKEN=<same value>
-YT_AUTOMATION_API_URL=http://yt-api:4000   # if both stacks share the docker network
+AUTOMATION_BEARER=<the token>
 ```
 
-If the YT stack runs in a different Dokploy project, expose its API on a
-subdomain (e.g. `https://yt-api.groovymark.com`) and put that URL here.
-
----
-
-## 2. Patch the YT API — copy-paste ready
-
-Open `apps/api/src/index.ts` (or wherever Fastify is initialised) and add:
-
-```ts
-// ── Bearer token middleware for service-to-service calls ──────────────────
-// Place this BEFORE the existing route registrations.
-fastify.addHook("onRequest", async (req, reply) => {
-  // Only enforce on /api/* routes; let /oauth, /health etc. through.
-  if (!req.url.startsWith("/api/")) return;
-
-  const auth = req.headers.authorization;
-  if (auth?.startsWith("Bearer ")) {
-    const token = auth.slice(7);
-    if (process.env.AUTOMATION_BEARER && token === process.env.AUTOMATION_BEARER) {
-      // mark request as service-authenticated; bypass cookie session checks
-      (req as any).serviceAuth = true;
-      return;
-    }
-  }
-  // fall through to existing session-cookie auth
-});
-```
-
-Then, in the same file, register the new route (adjust the import of the
-Prisma client to match the existing pattern):
-
-```ts
-import { prisma } from "@yt/shared";  // or wherever yours lives
-
-fastify.post("/api/items", async (req, reply) => {
-  if (!(req as any).serviceAuth) return reply.code(401).send({ error: "unauthorized" });
-
-  const body = req.body as {
-    channel: "OAP" | "OAG" | "NUR";
-    type: "long" | "short";
-    scheduledPublishAt: string;
-    title: string;
-    description: string;
-    tags?: string[];
-    filename: string;
-    thumbnailFilename?: string;
-    source?: string;
-    sourceRef?: string;
-  };
-
-  if (!body.channel || !body.type || !body.filename || !body.title) {
-    return reply.code(400).send({ error: "channel/type/filename/title required" });
-  }
-
-  // Resolve the Channel row by code (OAP/OAG/NUR → channelId).
-  // The exact column name depends on your schema — adjust if yours differs.
-  const channel = await prisma.channel.findFirst({
-    where: { code: body.channel },
-  });
-  if (!channel) return reply.code(404).send({ error: `channel ${body.channel} not found` });
-
-  const item = await prisma.item.create({
-    data: {
-      channelId: channel.id,
-      type: body.type,
-      status: "planned",
-      filename: body.filename,
-      thumbnailFilename: body.thumbnailFilename ?? null,
-      title: body.title,
-      description: body.description,
-      tags: body.tags ?? [],
-      scheduledPublishAt: new Date(body.scheduledPublishAt),
-      // Optional traceability — these columns are nullable in your schema.
-      // If they don't exist, drop them or add them via a migration.
-      // source: body.source ?? "automation",
-      // sourceRef: body.sourceRef ?? null,
-    },
-  });
-
-  return reply.code(201).send({ id: item.id });
-});
-```
-
-> **Schema check:** look at `prisma/schema.prisma` in the YT project. If the
-> `Item` model is named `Video` (or similar), adjust `prisma.item.create` to
-> match. The fields above (`channelId`, `type`, `status`, `filename`,
-> `thumbnailFilename`, `title`, `description`, `tags`, `scheduledPublishAt`)
-> all exist per the README's status lifecycle and filename convention.
-
----
-
-## 3. Add `AUTOMATION_BEARER` to YT's docker-compose
-
-In the YT `docker-compose.yml`, find every service that already lists env
-vars and add the new one alongside:
-
-```yaml
-  api:
-    environment:
-      # … existing vars …
-      AUTOMATION_BEARER: ${AUTOMATION_BEARER}
-```
-
----
-
-## 4. Optional: connect the docker networks
-
-If both stacks live on the same VPS, share the network so the automation
-worker reaches the YT API by container name (`http://yt-api:4000`) without
-exposing it publicly.
-
-Both compose files already include `dokploy-network: external: true`, so they
-join the same Dokploy overlay automatically. Just make sure each YT service's
-`networks:` array contains `dokploy-network` and that this project's
-`YT_AUTOMATION_API_URL` is `http://<yt-api-service-name>:4000`.
-
----
-
-## 5. Verify
-
-After both stacks are up:
+In the **Content Automation** `.env`:
 
 ```bash
-curl -X POST http://yt-api:4000/api/items \
+YT_AUTOMATION_API_TOKEN=<the same token>
+YT_AUTOMATION_API_URL=http://yt-api:4000     # if both stacks share the docker network
+# or
+YT_AUTOMATION_API_URL=https://api.youryt.com # if YT runs on a different host
+```
+
+### 2. Pull and redeploy YT
+
+```bash
+# On the VPS, in the YT project dir (or trigger from Dokploy UI):
+git pull
+docker compose up -d --build
+```
+
+### 3. Verify
+
+```bash
+curl -X POST http://yt-api:4000/automation/items \
   -H "Authorization: Bearer $AUTOMATION_BEARER" \
   -H "Content-Type: application/json" \
   -d '{
@@ -167,5 +78,46 @@ curl -X POST http://yt-api:4000/api/items \
   }'
 ```
 
-Expect `201` with `{"id":"<cuid>"}`. The YT dashboard's items list will show
-a `planned` row waiting for the Drive file with that exact filename.
+Expected: HTTP `201` with `{"id":"<cuid>"}`. The YT dashboard's Items
+view will show a `planned` row with that exact filename, waiting for the
+Drive file to land.
+
+If you instead get `503 automation_integration_disabled`, the YT app's
+`AUTOMATION_BEARER` env var isn't set.
+If you get `401 invalid_bearer`, the tokens don't match between the two
+projects.
+
+---
+
+## API contract (locked)
+
+`POST /automation/items` — request body:
+
+```json
+{
+  "channel": "OAP",                           // Channel.filenamePrefix, required
+  "type": "long",                             // "long" | "short" | "post", default "long"
+  "format": null,                             // "question" | "animation" | null
+  "filename": "OAP_2026-06-W1_long_1.mp4",    // must match YT's regex
+  "examTag": "D330",                          // optional
+  "title": "string (1..100 chars)",
+  "description": "string (..5000 chars)",
+  "tags": ["array", "of", "strings"],
+  "categoryId": "27",                         // YouTube category, default Education
+  "defaultLanguage": "en-US",
+  "recordingCountry": "US",
+  "madeForKids": false,
+  "scheduledPublishAt": "2026-06-07T14:00:00Z",
+  "source": "automation",                     // free-form, logged to ContentEvent
+  "sourceRef": "<ContentItem.id>"             // free-form, logged to ContentEvent
+}
+```
+
+Response: `201 { "id": "<cuid>" }`.
+
+Error codes:
+- `400` — Zod validation failed; message names the bad field.
+- `401` — missing or wrong bearer.
+- `404` — `filenamePrefix` doesn't match any Channel row.
+- `409` — duplicate `expectedFilename`.
+- `503` — `AUTOMATION_BEARER` not set on the YT side.
