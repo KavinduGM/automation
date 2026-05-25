@@ -6,6 +6,17 @@ import { notFound, redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
+// Build a public preview URL for an asset stored on the shared volume.
+// Honors ASSETS_PUBLIC_URL (set when the assets domain is wired in Dokploy);
+// falls back to a relative /assets/ path for local dev.
+const ASSETS_BASE = (process.env.ASSETS_PUBLIC_URL ?? "/assets").replace(/\/$/, "");
+function assetPreviewUrl(path: string | null | undefined): string | null {
+  if (!path) return null;
+  if (/^https?:\/\//.test(path)) return path;
+  const cleaned = path.replace(/^\/app\/assets\//, "").replace(/^\/+/, "");
+  return `${ASSETS_BASE}/${cleaned}`;
+}
+
 export default async function ContentDetail({ params }: { params: { id: string } }) {
   const user = await requireUser();
   const item = await prisma.contentItem.findUnique({
@@ -90,14 +101,32 @@ export default async function ContentDetail({ params }: { params: { id: string }
         {item.assets.length > 0 && (
           <div className="card mt-4">
             <h3 className="font-medium mb-2">Assets ({item.assets.length})</h3>
-            <ul className="text-xs space-y-1">
-              {item.assets.map((a) => (
-                <li key={a.id} className="flex justify-between">
-                  <span>{a.kind} · <code className="text-[10px]">{a.path}</code></span>
-                  <span className="text-gray-500">${a.costUsd.toFixed(3)}</span>
-                </li>
-              ))}
-            </ul>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              {item.assets.map((a) => {
+                const url = assetPreviewUrl(a.path);
+                return (
+                  <div key={a.id} className="rounded border bg-gray-50 p-2 text-xs">
+                    {a.kind === "image" && url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={url} alt={a.altText ?? ""} className="w-full h-32 object-cover rounded mb-2" />
+                    ) : a.kind === "video" && url ? (
+                      <video src={url} controls className="w-full h-32 rounded mb-2" />
+                    ) : a.kind === "voice" && url ? (
+                      <audio src={url} controls className="w-full mb-2" />
+                    ) : null}
+                    <div className="font-medium">{a.kind} {a.ord === 0 && a.kind === "image" ? "(cover)" : ""}</div>
+                    {a.altText && <div className="text-gray-500 mt-0.5 italic line-clamp-2">{a.altText}</div>}
+                    <div className="text-gray-400 mt-1 break-all">{a.path}</div>
+                    {url && (
+                      <a href={url} target="_blank" rel="noreferrer" className="text-brand-700 hover:underline">
+                        open ↗
+                      </a>
+                    )}
+                    <span className="float-right text-gray-500">${a.costUsd.toFixed(3)}</span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 

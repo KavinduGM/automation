@@ -47,7 +47,10 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
   const outlineRes = await claude<BlogOutline>({
     model: "writing",
     json: true,
-    maxTokens: 2400,
+    // Schema is rich (sections + bullets + faq + imagePrompts + internal links
+    // + 7 SEO fields). 4096 keeps us safe even when Claude is verbose with
+    // the FAQ answers.
+    maxTokens: 4096,
     system: Prompts.BLOG_OUTLINE_SYSTEM,
     user: Prompts.blogOutlineUser(topicTitle, brandBlock),
   });
