@@ -1,28 +1,27 @@
-{
-    email {$ACME_EMAIL}
-}
+# Pure static-file server for the shared `assets` Docker volume.
+#
+# This container does NOT terminate TLS or own host ports — Dokploy's
+# Traefik is the public entrypoint and routes assets.<your-domain> to
+# this service on port 80 internally.
 
-# ── Automation dashboard ────────────────────────────────────────────────
-{$DASHBOARD_DOMAIN} {
+:80 {
     encode zstd gzip
-    reverse_proxy dashboard:3000 {
-        header_up Host {host}
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto {scheme}
-    }
-}
 
-# ── Public asset host (shared across all client sites) ─────────────────
-# Serves /assets/<businessSlug>/<kind>/<file> from the automation assets
-# volume. Cache aggressively — content is immutable per filename.
-{$ASSETS_DOMAIN} {
-    encode zstd gzip
+    # Long-lived caching: every asset filename is content-addressed by the
+    # automation pipelines (UUID or content-item slug + ord), so cached
+    # responses never need to be invalidated.
     @img path *.png *.jpg *.jpeg *.webp *.gif *.svg
     @vid path *.mp4 *.mov *.webm
     @aud path *.mp3 *.wav *.m4a
     header @img Cache-Control "public, max-age=31536000, immutable"
     header @vid Cache-Control "public, max-age=31536000, immutable"
     header @aud Cache-Control "public, max-age=31536000, immutable"
+
+    # Permissive CORS so client sites on different subdomains can fetch
+    # assets without preflight issues (read-only volume, low risk).
+    header Access-Control-Allow-Origin "*"
+    header Access-Control-Allow-Methods "GET, HEAD, OPTIONS"
+
     root * /srv/assets
-    file_server
+    file_server browse=false
 }

@@ -159,22 +159,19 @@ services:
     networks: [dokploy-network, default]
     restart: unless-stopped
 
-  caddy:
+  # Static-file server for the shared assets volume. Internal only — Dokploy's
+  # Traefik fronts it (no host port bindings to avoid conflict with Traefik's
+  # own :80/:443). In the Dokploy UI:
+  #   - point assets.<domain> → service `assets`, port 80
+  #   - point automation.<domain> → service `dashboard`, port 3000
+  assets:
     image: caddy:2-alpine
-    ports:
-      - "80:80"
-      - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddydata:/data
       - caddyconfig:/config
       - assets:/srv/assets:ro
-    environment:
-      DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN:-automation.groovymark.com}
-      ASSETS_DOMAIN:    ${ASSETS_DOMAIN:-assets.groovymark.com}
-      ACME_EMAIL:       ${ACME_EMAIL:-admin@groovymark.com}
-    depends_on:
-      - dashboard
+    expose: ["80"]
     networks: [dokploy-network, default]
     restart: unless-stopped
 
