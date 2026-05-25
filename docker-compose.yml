@@ -22,7 +22,11 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru", "--appendonly", "no"]
+    # noeviction is REQUIRED by BullMQ — any other policy can drop in-flight
+    # job data and silently lose work. Memory cap kept tight; if it fills up,
+    # Redis refuses new writes (visible as job-enqueue errors) instead of
+    # quietly evicting state we depend on.
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
     volumes:
       - redisdata:/data
     healthcheck:

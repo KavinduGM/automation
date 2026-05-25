@@ -1,7 +1,7 @@
 // Worker process. Spins up one BullMQ consumer per logical queue.
 // All long-running work happens here — Next.js routes only enqueue.
 
-import { QUEUES, logger, spawnWorker, env, queue } from "@ca/shared";
+import { QUEUES, logger, spawnWorker, env, queue, prisma } from "@ca/shared";
 import {
   runBlogPipeline,
   runSocialPipeline,
@@ -19,6 +19,22 @@ import {
 } from "@ca/pipelines";
 import { runDigestNow } from "./digest.js";
 
+// When a pipeline throws, BullMQ logs the failure but the ContentItem stays
+// frozen in whatever status it was in (often `researching` or `drafting`),
+// making the dashboard misleading. This wrapper updates the row so reviewers
+// see what actually went wrong.
+async function markItemFailed(contentItemId: string, err: unknown) {
+  const msg = err instanceof Error ? err.message : String(err);
+  try {
+    await prisma.contentItem.update({
+      where: { id: contentItemId },
+      data: { status: "failed", reviewNotes: msg.slice(0, 4000) },
+    });
+  } catch (updateErr) {
+    logger.error({ updateErr, contentItemId }, "worker.mark_failed_update_failed");
+  }
+}
+
 logger.info({ concurrency: env().WORKER_CONCURRENCY }, "worker.boot");
 
 // ── Research (per-business topic gathering) ──────────────────────────────
@@ -30,17 +46,23 @@ spawnWorker(QUEUES.research, async (job) => {
 // ── Pipeline kickoffs (one entry per content type) ───────────────────────
 spawnWorker(QUEUES.draft, async (job) => {
   const { contentItemId, type, sub } = job.data as { contentItemId: string; type: string; sub?: string };
-  switch (type) {
-    case "blog":         return runBlogPipeline(contentItemId);
-    case "social_post":  return runSocialPipeline(contentItemId);
-    case "case_study":   return runCaseStudyPipeline(contentItemId);
-    case "resource":     return runResourcePipeline(contentItemId);
-    case "landing_page": return runLandingPagePipeline(contentItemId);
-    case "webinar":
-      if (sub === "titles") return runWebinarTitlesStep(contentItemId);
-      return runWebinarScriptAndProduce(contentItemId);
-    default:
-      throw new Error(`draft: unknown type ${type}`);
+  try {
+    switch (type) {
+      case "blog":         return await runBlogPipeline(contentItemId);
+      case "social_post":  return await runSocialPipeline(contentItemId);
+      case "case_study":   return await runCaseStudyPipeline(contentItemId);
+      case "resource":     return await runResourcePipeline(contentItemId);
+      case "landing_page": return await runLandingPagePipeline(contentItemId);
+      case "webinar":
+        if (sub === "titles") return await runWebinarTitlesStep(contentItemId);
+        return await runWebinarScriptAndProduce(contentItemId);
+      default:
+        throw new Error(`draft: unknown type ${type}`);
+    }
+  } catch (err) {
+    logger.error({ err, contentItemId, type }, "worker.draft_failed");
+    await markItemFailed(contentItemId, err);
+    throw err; // let BullMQ record the job as failed (with retries)
   }
 });
 
