@@ -1,0 +1,23 @@
+{
+  "name": "@ca/pipelines",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ca/shared": "*",
+    "@ca/providers": "*",
+    "slugify": "^1.6.6"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

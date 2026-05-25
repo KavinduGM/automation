@@ -1,0 +1,446 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Content Automation — Prisma schema
+// Shared multi-tenant DB. Every domain row carries `businessId`.
+// Client websites (e.g. GroovyMark WebX) read from this same database via
+// their own Prisma client filtered by businessId.
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Identity ───────────────────────────────────────────────────────────────
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  name         String?
+  role         UserRole  @default(editor)
+  createdAt    DateTime  @default(now())
+  sessions     Session[]
+  auditLogs    AuditLog[]
+}
+
+enum UserRole {
+  admin
+  editor
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ── Tenancy ────────────────────────────────────────────────────────────────
+
+model Business {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  name        String
+  timezone    String   @default("UTC")
+  // Connection string of the client website's DB (or "shared" to use this one).
+  // Reserved for future use when a client lives in a different schema/instance.
+  siteDbHint  String?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  brandKit         BrandKit?
+  contentPlans     ContentPlan[]
+  approvalRules    ApprovalRule[]
+  topicSources     TopicSource[]
+  topicCandidates  TopicCandidate[]
+  contentItems     ContentItem[]
+  assets           Asset[]
+  integrations     Integration[]
+  posts            Post[]
+  caseStudies      CaseStudy[]
+  resources        Resource[]
+  landingPages     LandingPage[]
+  socialPosts      SocialPost[]
+  auditLogs        AuditLog[]
+}
+
+model BrandKit {
+  id            String   @id @default(cuid())
+  businessId    String   @unique
+  business      Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  // Free-form structured voice JSON: { tone, audience, persona, dosAndDonts, … }
+  voice         Json     @default("{}")
+  bannedWords   String[] @default([])
+  icp           String   @default("")  // ideal customer profile description
+  usps          String[] @default([])  // unique selling points
+  // Markdown style guide auto-generated from voice + samples by Claude.
+  styleGuideMd  String   @default("")
+  // Uploaded sample content the AI can mimic (titles + raw text).
+  samples       Json     @default("[]")
+  updatedAt     DateTime @updatedAt
+}
+
+// Per-business publishing plan. One row per (business, contentType).
+model ContentPlan {
+  id            String      @id @default(cuid())
+  businessId    String
+  business      Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  contentType   ContentType
+  perPeriod     Int         @default(1)
+  period        Period      @default(day)
+  approvalMode  ApprovalMode @default(human_review)
+  active        Boolean     @default(true)
+  updatedAt     DateTime    @updatedAt
+
+  @@unique([businessId, contentType])
+}
+
+enum ContentType {
+  blog
+  case_study
+  resource
+  social_post
+  landing_page
+  webinar
+}
+
+enum Period {
+  day
+  week
+  month
+}
+
+enum ApprovalMode {
+  auto          // publish without review
+  ai_review     // Claude self-critique, escalate on failure
+  human_review  // queue for human approval
+}
+
+// Fine-grained rules (banned words → block, length → reject, etc.). JSON-driven.
+model ApprovalRule {
+  id          String      @id @default(cuid())
+  businessId  String
+  business    Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  contentType ContentType
+  rule        Json
+  active      Boolean     @default(true)
+
+  @@index([businessId, contentType])
+}
+
+// Encrypted third-party credentials per business (Buffer tokens, site DB keys, etc.).
+model Integration {
+  id           String   @id @default(cuid())
+  businessId   String
+  business     Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  kind         String   // buffer | youtube_proxy | canva | site_db | …
+  // Encrypted JSON blob (AES-256-GCM). Decrypted at use-time.
+  configCipher String
+  configIv     String
+  configTag    String
+  updatedAt    DateTime @updatedAt
+
+  @@unique([businessId, kind])
+}
+
+// ── Topic research ─────────────────────────────────────────────────────────
+
+model TopicSource {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  kind       TopicSourceKind
+  // { subreddits: [...], query: "...", limit: 50, ... }
+  config     Json     @default("{}")
+  active     Boolean  @default(true)
+  lastRunAt  DateTime?
+
+  @@index([businessId, kind])
+}
+
+enum TopicSourceKind {
+  reddit
+  grok_x
+  claude_seed
+  rss
+}
+
+model TopicCandidate {
+  id          String   @id @default(cuid())
+  businessId  String
+  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  source      TopicSourceKind
+  title       String
+  url         String?
+  raw         Json     @default("{}")
+  score       Float    @default(0)
+  // sha256 of normalized title — guards against re-using the same idea.
+  dedupeHash  String
+  usedAt      DateTime?
+  createdAt   DateTime @default(now())
+
+  @@unique([businessId, dedupeHash])
+  @@index([businessId, usedAt])
+  @@index([businessId, score])
+}
+
+// ── The pipeline core: ContentItem ─────────────────────────────────────────
+
+model ContentItem {
+  id           String        @id @default(cuid())
+  businessId   String
+  business     Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  type         ContentType
+  status       ContentStatus @default(queued)
+  title        String        @default("")
+  slug         String?
+  bodyMd       String        @default("")
+  // Type-specific fields go here (excerpt, sections, cta, social text…).
+  meta         Json          @default("{}")
+  scheduledAt  DateTime?
+  publishedAt  DateTime?
+  // Increment on each edit; helpful for optimistic concurrency in the UI.
+  version      Int           @default(1)
+  // Aggregate cost across all jobs that produced this item (USD).
+  costUsd      Float         @default(0)
+  // Free-form note from AI critic or human reviewer.
+  reviewNotes  String        @default("")
+  topicCandidateId String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  assets        Asset[]
+  webinarIntent WebinarIntent?
+  caseStudyIntake CaseStudyIntake?
+  // Pointers to the materialized "published" rows once status=published.
+  publishedPost        Post?
+  publishedCaseStudy   CaseStudy?
+  publishedResource    Resource?
+  publishedLandingPage LandingPage?
+  publishedSocialPost  SocialPost?
+
+  @@index([businessId, type, status])
+  @@index([businessId, scheduledAt])
+  @@unique([businessId, type, slug])
+}
+
+enum ContentStatus {
+  queued
+  researching
+  drafting
+  generating_media
+  self_critique
+  review        // awaiting human approval
+  approved
+  publishing
+  published
+  rejected
+  failed
+  cancelled
+}
+
+model Asset {
+  id            String      @id @default(cuid())
+  businessId    String
+  business      Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  contentItemId String?
+  contentItem   ContentItem? @relation(fields: [contentItemId], references: [id], onDelete: SetNull)
+  kind          AssetKind
+  path          String      // /app/assets/{businessSlug}/{kind}/{uuid}.{ext}
+  provider      String      // openai_image | elevenlabs | heygen | canva | local
+  prompt        String      @default("")
+  meta          Json        @default("{}")
+  costUsd       Float       @default(0)
+  createdAt     DateTime    @default(now())
+
+  @@index([businessId, kind])
+  @@index([contentItemId])
+}
+
+enum AssetKind {
+  image
+  voice
+  video
+  thumbnail
+  document
+}
+
+// ── Webinar & case-study side tables ───────────────────────────────────────
+
+model WebinarIntent {
+  id            String       @id @default(cuid())
+  contentItemId String       @unique
+  contentItem   ContentItem  @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  mode          WebinarMode  @default(avatar)
+  // When mode=self_record: the filename the user must use in Drive
+  // (matches YouTube Automation's convention).
+  driveFilename String?
+  scriptMd      String       @default("")
+  ytItemId      String?      // set when handed off to YT automation
+  updatedAt     DateTime     @updatedAt
+}
+
+enum WebinarMode {
+  self_record
+  avatar
+  animated
+}
+
+model CaseStudyIntake {
+  id            String      @id @default(cuid())
+  contentItemId String      @unique
+  contentItem   ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  clientName    String
+  problem       String
+  solution      String
+  metric        String       // headline number, e.g. "+312% qualified leads"
+  quote         String?
+  quoteAuthor   String?
+  attachments   Json         @default("[]")
+  updatedAt     DateTime     @updatedAt
+}
+
+// ── Job tracking (BullMQ mirror for UI) ────────────────────────────────────
+
+model Job {
+  id          String     @id @default(cuid())
+  queue       String     // research | draft | media | critique | publish | …
+  name        String
+  state       JobState
+  attempts    Int        @default(0)
+  payload     Json
+  result      Json?
+  lastError   String?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime   @default(now())
+
+  @@index([queue, state])
+  @@index([createdAt])
+}
+
+enum JobState {
+  waiting
+  active
+  completed
+  failed
+  delayed
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  businessId String?
+  business   Business? @relation(fields: [businessId], references: [id], onDelete: SetNull)
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String   // approve | reject | edit | publish | …
+  target     String   // ContentItem:abc123
+  diff       Json     @default("{}")
+  at         DateTime @default(now())
+
+  @@index([businessId, at])
+  @@index([target])
+}
+
+// ── Published content (what client sites read) ─────────────────────────────
+// These rows are materialized when a ContentItem transitions to `published`.
+// Keeping them in separate tables means client sites query a clean, narrow
+// schema and never accidentally serve drafts.
+
+model Post {
+  id             String   @id @default(cuid())
+  businessId     String
+  business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  contentItemId  String   @unique
+  contentItem    ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  slug           String
+  title          String
+  excerpt        String   @default("")
+  bodyMd         String
+  coverImagePath String?
+  tags           String[] @default([])
+  publishedAt    DateTime @default(now())
+
+  @@unique([businessId, slug])
+  @@index([businessId, publishedAt])
+}
+
+model CaseStudy {
+  id             String   @id @default(cuid())
+  businessId     String
+  business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  contentItemId  String   @unique
+  contentItem    ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  slug           String
+  title          String
+  clientName     String
+  metric         String
+  bodyMd         String
+  coverImagePath String?
+  publishedAt    DateTime @default(now())
+
+  @@unique([businessId, slug])
+  @@index([businessId, publishedAt])
+}
+
+model Resource {
+  id             String   @id @default(cuid())
+  businessId     String
+  business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  contentItemId  String   @unique
+  contentItem    ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  slug           String
+  title          String
+  kind           String   // tool | template | guide
+  bodyMd         String
+  downloadPath   String?
+  coverImagePath String?
+  publishedAt    DateTime @default(now())
+
+  @@unique([businessId, slug])
+  @@index([businessId, publishedAt])
+}
+
+model LandingPage {
+  id             String   @id @default(cuid())
+  businessId     String
+  business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  contentItemId  String   @unique
+  contentItem    ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  slug           String
+  title          String
+  // Structured sections rendered by the site's <LandingPage> component:
+  // [{ kind: "hero", props: {...} }, { kind: "features", props: {...} }, …]
+  sections       Json
+  metaTitle      String?
+  metaDescription String?
+  publishedAt    DateTime @default(now())
+
+  @@unique([businessId, slug])
+  @@index([businessId, publishedAt])
+}
+
+model SocialPost {
+  id             String   @id @default(cuid())
+  businessId     String
+  business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  contentItemId  String   @unique
+  contentItem    ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  channel        String   // linkedin | x | instagram
+  body           String
+  imagePath      String?
+  bufferUpdateId String?  // returned from Buffer API
+  scheduledAt    DateTime
+  publishedAt    DateTime?
+
+  @@index([businessId, channel, scheduledAt])
+}

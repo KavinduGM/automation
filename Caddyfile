@@ -1,0 +1,28 @@
+{
+    email {$ACME_EMAIL}
+}
+
+# ── Automation dashboard ────────────────────────────────────────────────
+{$DASHBOARD_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy dashboard:3000 {
+        header_up Host {host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+}
+
+# ── Public asset host (shared across all client sites) ─────────────────
+# Serves /assets/<businessSlug>/<kind>/<file> from the automation assets
+# volume. Cache aggressively — content is immutable per filename.
+{$ASSETS_DOMAIN} {
+    encode zstd gzip
+    @img path *.png *.jpg *.jpeg *.webp *.gif *.svg
+    @vid path *.mp4 *.mov *.webm
+    @aud path *.mp3 *.wav *.m4a
+    header @img Cache-Control "public, max-age=31536000, immutable"
+    header @vid Cache-Control "public, max-age=31536000, immutable"
+    header @aud Cache-Control "public, max-age=31536000, immutable"
+    root * /srv/assets
+    file_server
+}

@@ -1,0 +1,33 @@
+{
+  "name": "content-automation",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @ca/shared && npm run build -w @ca/providers && npm run build -w @ca/pipelines && npm run build -w @ca/worker && npm run build -w @ca/scheduler && npm run build -w @ca/dashboard",
+    "dev:dashboard": "npm run dev -w @ca/dashboard",
+    "dev:worker": "npm run dev -w @ca/worker",
+    "dev:scheduler": "npm run dev -w @ca/scheduler",
+    "start:dashboard": "npm run start -w @ca/dashboard",
+    "start:worker": "npm run start -w @ca/worker",
+    "start:scheduler": "npm run start -w @ca/scheduler",
+    "prisma:generate": "prisma generate",
+    "prisma:push": "prisma db push",
+    "prisma:studio": "prisma studio",
+    "typecheck": "npm run typecheck -w @ca/shared && npm run typecheck -w @ca/providers && npm run typecheck -w @ca/pipelines && npm run typecheck -w @ca/worker && npm run typecheck -w @ca/scheduler && npm run typecheck -w @ca/dashboard"
+  },
+  "devDependencies": {
+    "prisma": "^5.22.0",
+    "typescript": "^5.6.3",
+    "@types/node": "^20.14.0"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

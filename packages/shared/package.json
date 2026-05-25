@@ -1,0 +1,32 @@
+{
+  "name": "@ca/shared",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".":          { "types": "./dist/index.d.ts",          "default": "./dist/index.js" },
+    "./db":       { "types": "./dist/db.d.ts",             "default": "./dist/db.js" },
+    "./env":      { "types": "./dist/env.d.ts",            "default": "./dist/env.js" },
+    "./crypto":   { "types": "./dist/crypto.d.ts",         "default": "./dist/crypto.js" },
+    "./queue":    { "types": "./dist/queue.d.ts",          "default": "./dist/queue.js" },
+    "./logger":   { "types": "./dist/logger.d.ts",         "default": "./dist/logger.js" },
+    "./cost":     { "types": "./dist/cost.d.ts",           "default": "./dist/cost.js" },
+    "./prompts":  { "types": "./dist/prompts/index.d.ts",  "default": "./dist/prompts/index.js" }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "bullmq": "^5.21.0",
+    "ioredis": "^5.4.1",
+    "pino": "^9.5.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

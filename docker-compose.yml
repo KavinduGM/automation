@@ -1,0 +1,193 @@
+# Dokploy-friendly Docker Compose for Content Automation.
+# Dokploy injects environment variables from its Environment tab as shell vars
+# at `docker compose up` time. We expand them per service via ${VAR}.
+# No YAML anchors (Dokploy's preprocessor may not expand them correctly).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB:       ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [dokploy-network, default]
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru", "--appendonly", "no"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [dokploy-network, default]
+    restart: unless-stopped
+
+  migrator:
+    build: .
+    command: ["sh", "-c", "npx prisma db push --accept-data-loss --skip-generate"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [dokploy-network, default]
+    restart: "no"
+
+  dashboard:
+    build: .
+    working_dir: /app/apps/dashboard
+    command: ["node", "/app/node_modules/next/dist/bin/next", "start", "-p", "3000"]
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      TZ: ${TZ}
+      LOG_LEVEL: ${LOG_LEVEL}
+      DASHBOARD_URL: ${DASHBOARD_URL}
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      SESSION_SECRET: ${SESSION_SECRET}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+      ALLOWED_LOGIN_EMAILS: ${ALLOWED_LOGIN_EMAILS}
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      RESEND_FROM: ${RESEND_FROM}
+      APPROVAL_DIGEST_TO: ${APPROVAL_DIGEST_TO}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_MODEL_WRITING: ${ANTHROPIC_MODEL_WRITING}
+      ANTHROPIC_MODEL_ROUTING: ${ANTHROPIC_MODEL_ROUTING}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_IMAGE_MODEL: ${OPENAI_IMAGE_MODEL}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY}
+      ELEVENLABS_DEFAULT_VOICE_ID: ${ELEVENLABS_DEFAULT_VOICE_ID}
+      HEYGEN_API_KEY: ${HEYGEN_API_KEY}
+      HEYGEN_DEFAULT_AVATAR_ID: ${HEYGEN_DEFAULT_AVATAR_ID}
+      HEYGEN_DEFAULT_VOICE_ID: ${HEYGEN_DEFAULT_VOICE_ID}
+      CANVA_API_KEY: ${CANVA_API_KEY}
+      BUFFER_ACCESS_TOKEN: ${BUFFER_ACCESS_TOKEN}
+      GROK_API_KEY: ${GROK_API_KEY}
+      REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID}
+      REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET}
+      REDDIT_USER_AGENT: ${REDDIT_USER_AGENT}
+      YT_AUTOMATION_API_URL: ${YT_AUTOMATION_API_URL}
+      YT_AUTOMATION_API_TOKEN: ${YT_AUTOMATION_API_TOKEN}
+      ASSETS_DIR: ${ASSETS_DIR}
+      TMP_DIR: ${TMP_DIR}
+    volumes:
+      - assets:/app/assets
+      - tmp:/app/tmp
+    expose: ["3000"]
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks: [dokploy-network, default]
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["node", "/app/apps/worker/dist/index.js"]
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      TZ: ${TZ}
+      LOG_LEVEL: ${LOG_LEVEL}
+      DASHBOARD_URL: ${DASHBOARD_URL}
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      RESEND_FROM: ${RESEND_FROM}
+      APPROVAL_DIGEST_TO: ${APPROVAL_DIGEST_TO}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_MODEL_WRITING: ${ANTHROPIC_MODEL_WRITING}
+      ANTHROPIC_MODEL_ROUTING: ${ANTHROPIC_MODEL_ROUTING}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_IMAGE_MODEL: ${OPENAI_IMAGE_MODEL}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY}
+      ELEVENLABS_DEFAULT_VOICE_ID: ${ELEVENLABS_DEFAULT_VOICE_ID}
+      HEYGEN_API_KEY: ${HEYGEN_API_KEY}
+      HEYGEN_DEFAULT_AVATAR_ID: ${HEYGEN_DEFAULT_AVATAR_ID}
+      HEYGEN_DEFAULT_VOICE_ID: ${HEYGEN_DEFAULT_VOICE_ID}
+      CANVA_API_KEY: ${CANVA_API_KEY}
+      BUFFER_ACCESS_TOKEN: ${BUFFER_ACCESS_TOKEN}
+      GROK_API_KEY: ${GROK_API_KEY}
+      REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID}
+      REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET}
+      REDDIT_USER_AGENT: ${REDDIT_USER_AGENT}
+      YT_AUTOMATION_API_URL: ${YT_AUTOMATION_API_URL}
+      YT_AUTOMATION_API_TOKEN: ${YT_AUTOMATION_API_TOKEN}
+      ASSETS_DIR: ${ASSETS_DIR}
+      TMP_DIR: ${TMP_DIR}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY}
+    volumes:
+      - assets:/app/assets
+      - tmp:/app/tmp
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks: [dokploy-network, default]
+    restart: unless-stopped
+
+  scheduler:
+    build: .
+    command: ["node", "/app/apps/scheduler/dist/index.js"]
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      TZ: ${TZ}
+      LOG_LEVEL: ${LOG_LEVEL}
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      SCHEDULER_TICK_SECONDS: ${SCHEDULER_TICK_SECONDS}
+      RESEARCH_CRON: ${RESEARCH_CRON}
+      DIGEST_CRON: ${DIGEST_CRON}
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks: [dokploy-network, default]
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+      - assets:/srv/assets:ro
+    environment:
+      DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN:-automation.groovymark.com}
+      ASSETS_DOMAIN:    ${ASSETS_DOMAIN:-assets.groovymark.com}
+      ACME_EMAIL:       ${ACME_EMAIL:-admin@groovymark.com}
+    depends_on:
+      - dashboard
+    networks: [dokploy-network, default]
+    restart: unless-stopped
+
+networks:
+  dokploy-network:
+    external: true
+  default:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:
+  assets:
+  tmp:
+  caddydata:
+  caddyconfig:

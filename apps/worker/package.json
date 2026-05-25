@@ -1,0 +1,21 @@
+{
+  "name": "@ca/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ca/shared": "*",
+    "@ca/providers": "*",
+    "@ca/pipelines": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
