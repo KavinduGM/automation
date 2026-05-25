@@ -27,6 +27,9 @@ RUN npm install --include=dev --no-audit --no-fund
 # ── build ───────────────────────────────────────────────────────────────────
 FROM deps AS build
 COPY . .
+# Defensive: make sure Next.js's expected `public/` dir exists even when no
+# static assets are committed — otherwise the runtime stage's COPY fails.
+RUN mkdir -p apps/dashboard/public
 RUN npx prisma generate
 RUN npm run build
 
