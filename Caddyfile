@@ -23,5 +23,7 @@
     header Access-Control-Allow-Methods "GET, HEAD, OPTIONS"
 
     root * /srv/assets
-    file_server browse=false
+    # No argument = directory browsing OFF (Caddy's default). Use
+    # `file_server browse` to enable it.
+    file_server
 }
