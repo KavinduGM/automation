@@ -4,6 +4,7 @@ export function Nav({ businessSlug }: { businessSlug?: string }) {
   const links = [
     { href: "/", label: "Overview" },
     { href: "/review", label: "Review queue" },
+    { href: "/auto-review", label: "Auto-review" },
     { href: "/businesses", label: "Businesses" },
     { href: "/jobs", label: "Jobs" },
     { href: "/cost", label: "Cost" },

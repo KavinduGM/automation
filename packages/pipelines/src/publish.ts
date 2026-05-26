@@ -1,5 +1,5 @@
 import { prisma, logger, queue, QUEUES, type Prisma } from "@ca/shared";
-import { schedulePost } from "@ca/providers";
+import { schedulePost, revalidateForContent } from "@ca/providers";
 import { setStatus } from "./util.js";
 import { publishedSeo, type SeoBundle, emptySeo } from "./seo.js";
 import { publicUrlFor } from "./post-review.js";
@@ -34,6 +34,18 @@ export async function publishContentItem(contentItemId: string): Promise<void> {
       where: { id: contentItemId },
       data: { status: "published", publishedAt: new Date() },
     });
+
+    // Tell the client site to flush the index + detail pages from its ISR
+    // cache immediately. Without this, the /blog index keeps serving the
+    // pre-publish HTML (no new card) — OR after a rollback re-publish, the
+    // /blog index keeps the old card pointing at a now-404 detail page.
+    if (item.type === "blog" || item.type === "case_study" || item.type === "resource" || item.type === "landing_page") {
+      void revalidateForContent({
+        businessId: item.businessId,
+        type: item.type,
+        slug: item.slug,
+      }).catch((err) => logger.warn({ err, contentItemId }, "publish.revalidate_failed"));
+    }
 
     // Schedule a post-publish live-page review ~3 minutes out so any stale
     // 404 ISR cache from a previous failed publish has time to expire

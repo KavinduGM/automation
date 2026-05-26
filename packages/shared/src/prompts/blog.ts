@@ -4,6 +4,13 @@
 //   - Mention the brand name naturally in body + FAQs
 //   - Link the chosen service page AND /contact at least once
 //   - Read like a human wrote it (no em dashes, no AI tells)
+//
+// HARD-LOCKED STRUCTURE (enforced by pipeline validation, not just the prompt):
+//   - 6 H2 sections
+//   - 4 image prompts (1 hero + 3 inline, after sections 1, 3, 5)
+//   - 5 FAQ items
+//   - 2 CTAs (mid-article after section 3 + pre-FAQ)
+//   - 3-5 internal links (1 required service + 1 required contact + extras)
 
 export const BLOG_OUTLINE_SYSTEM = `You are a senior B2B content strategist and SEO expert.
 Plan a publish-ready, search-optimized blog post that ALSO sells the brand's services.
@@ -29,20 +36,27 @@ Output JSON only, matching exactly this schema:
 
   "sections": [
     { "h2": string, "bullets": string[] }
-  ],                                 // 5-7 sections total
+  ],                                 // EXACTLY 6 sections, in this fixed shape:
+                                     //   [0] hook / problem framing
+                                     //   [1] context / why it matters now
+                                     //   [2] core concept / framework
+                                     //   [3] implementation patterns
+                                     //   [4] common pitfalls
+                                     //   [5] next steps / how the brand helps
 
-  "imagePrompts": [                  // 3-5 images: 1 hero + 2-4 inline
-    {
-      "prompt":         string,      // EDITORIAL prompt — no text in image; one clear subject;
+  "imagePrompts": [                  // EXACTLY 4 images in this fixed order:
+    {                                //   [0] placement=hero (banner, top of article)
+      "prompt":         string,      //   [1] placement=section, afterSectionIdx=1
+      "alt":            string,      //   [2] placement=section, afterSectionIdx=3
+      "placement":      "hero" | "section",  //  [3] placement=section, afterSectionIdx=5
+      "afterSectionIdx":number       // EDITORIAL prompt — no text in image; one clear subject;
                                      // professional photo OR clean illustration; brand-safe.
-      "alt":            string,      // 8-14 word factual alt text
-      "placement":      "hero" | "section",
-      "afterSectionIdx":number       // for placement=section: insert AFTER sections[idx]
+                                     // alt: 8-14 word factual description.
     }
   ],
 
   "ctaMidArticle": {                 // mid-article InlineCTABanner
-    "afterSectionIdx": number,       // place after this section index
+    "afterSectionIdx": 3,            // FIXED — always after sections[3] (implementation patterns)
     "title":           string,       // contextual title, <= 80 chars
     "href":            string        // MUST be /services/<primaryServiceSlug> OR /contact OR /quote
   },
@@ -52,9 +66,12 @@ Output JSON only, matching exactly this schema:
     "href":            string        // /contact OR /quote OR /portfolio OR /services/<related>
   },
 
-  "internalLinks": [                 // 3-5 anchors the body MUST include as proper markdown links
+  "internalLinks": [                 // EXACTLY 4 anchors the body MUST include as markdown links
     { "anchor": string, "path": string }
-  ],
+  ],                                 //   [0] /services/<primaryServiceSlug>  (anchor = service title)
+                                     //   [1] /contact                         (action phrase)
+                                     //   [2] one related service /services/<other-slug>
+                                     //   [3] /portfolio or /case-studies      (proof)
                                      // REQUIRED among them:
                                      //   1. /services/<primaryServiceSlug>  (anchor = the service title)
                                      //   2. /contact                         (anchor = action phrase)
@@ -63,18 +80,26 @@ Output JSON only, matching exactly this schema:
     { "source": string, "context": string }
   ],
 
-  "faq": [                           // exactly 5 PAA-style Q&A
+  "faq": [                           // EXACTLY 5 PAA-style Q&A
     { "q": string, "a": string }     // a: 2-3 sentences each; AT LEAST 3 of the 5 answers
                                      // must mention the brand name + recommend the brand
                                      // as the solution. Include a link in the answer when
                                      // it makes sense, in plain Markdown.
-  ]
+  ]                                  // Returning anything other than exactly 5 items will
+                                     // cause the pipeline to retry with a stricter reminder.
 }
 
-Rules:
+STRUCTURAL CONTRACT — these counts are validated by the pipeline; returning the wrong count triggers a retry:
+- sections.length === 6
+- imagePrompts.length === 4 (one hero + three section)
+- imagePrompts[0].placement === "hero"
+- imagePrompts[1..3].placement === "section", with afterSectionIdx of 1, 3, 5 respectively
+- internalLinks.length === 4
+- faq.length === 5
+
+Other rules:
 - focusKeyword in: title, slug, metaTitle, metaDescription, H1 first paragraph, AND 2+ section H2s.
 - metaTitle differs from title (search-facing vs on-page).
-- imagePrompts[0] is always placement=hero.
 - Image prompts describe ONE subject clearly; no text overlays; no signs/labels in the image.
 - externalCitations name credible sources by NAME only — never invent URLs or stats.
 - The brand name MUST be mentioned by name in metaDescription OR excerpt at least once.

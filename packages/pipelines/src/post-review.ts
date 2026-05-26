@@ -28,7 +28,10 @@
 // short delay before giving up. Three tries total.
 
 import { prisma, logger, queue, QUEUES, brandSiteFor, Prompts, type Prisma } from "@ca/shared";
-import { claude } from "@ca/providers";
+import { claude, revalidateForContent } from "@ca/providers";
+
+// How many auto-fix attempts to allow before locking to human review.
+const MAX_AUTO_FIX_ATTEMPTS = 2;
 
 export interface PostReviewJobData {
   contentItemId: string;
@@ -352,27 +355,83 @@ async function rollback(contentItemId: string, report: ReviewReport) {
   const item = await prisma.contentItem.findUnique({ where: { id: contentItemId } });
   if (!item || item.status !== "published") return;
 
-  // Remove the materialized published row so the live site stops serving it.
+  // Remove the materialized published row so the live site stops serving it,
+  // THEN flush the client site's ISR cache so the index card disappears too
+  // (closes the SEO-poisoning gap where the card outlived its detail page).
   switch (item.type) {
     case "blog":         await prisma.post.deleteMany({ where: { contentItemId } }); break;
     case "case_study":   await prisma.caseStudy.deleteMany({ where: { contentItemId } }); break;
     case "resource":     await prisma.resource.deleteMany({ where: { contentItemId } }); break;
     case "landing_page": await prisma.landingPage.deleteMany({ where: { contentItemId } }); break;
   }
+  if (item.type === "blog" || item.type === "case_study" || item.type === "resource" || item.type === "landing_page") {
+    void revalidateForContent({
+      businessId: item.businessId,
+      type: item.type,
+      slug: item.slug,
+    }).catch((err) => logger.warn({ err, contentItemId }, "rollback.revalidate_failed"));
+  }
 
-  const summary = report.findings
-    .filter((f) => f.severity === "high")
-    .map((f) => `- [${f.area}] ${f.message}`)
-    .join("\n");
+  // Count how many auto-fix attempts have already happened on this item.
+  const meta = (item.meta ?? {}) as { autoFixAttempts?: number };
+  const previousAttempts = meta.autoFixAttempts ?? 0;
+  const nextAttempt = previousAttempts + 1;
 
+  const highFindings = report.findings.filter((f) => f.severity === "high");
+  const summary = highFindings.map((f) => `- [${f.area}] ${f.message}`).join("\n");
+
+  // Auto-fix loop: only for blogs (the only pipeline that takes findings
+  // feedback right now). Other types go straight to human review.
+  const canAutoFix =
+    item.type === "blog" && previousAttempts < MAX_AUTO_FIX_ATTEMPTS;
+
+  if (canAutoFix) {
+    await prisma.contentItem.update({
+      where: { id: contentItemId },
+      data: {
+        status: "queued",
+        reviewNotes:
+          `Auto-rolled back (attempt ${report.attempt}). Auto-fix retry ${nextAttempt}/${MAX_AUTO_FIX_ATTEMPTS} starting…\n` + summary,
+        meta: {
+          ...(item.meta as object),
+          autoFixAttempts: nextAttempt,
+          lastFindings: highFindings as unknown as Prisma.InputJsonValue,
+        } as Prisma.InputJsonValue,
+      },
+    });
+    // Re-enqueue the draft pipeline. The blog pipeline reads
+    // item.meta.lastFindings and feeds them to Claude as corrective context.
+    await queue(QUEUES.draft).add(
+      `${item.type}:${contentItemId}:autofix:${nextAttempt}`,
+      { contentItemId, type: item.type },
+    );
+    logger.info(
+      { contentItemId, attempt: nextAttempt, findings: highFindings.length },
+      "post_review.auto_fix_enqueued",
+    );
+    return;
+  }
+
+  // Locked to human review.
   await prisma.contentItem.update({
     where: { id: contentItemId },
     data: {
       status: "review",
       reviewNotes:
-        `Auto-rolled back by post-publish reviewer (${report.checkedAt}, attempt ${report.attempt}):\n` + summary,
+        previousAttempts >= MAX_AUTO_FIX_ATTEMPTS
+          ? `Auto-fix exhausted (${MAX_AUTO_FIX_ATTEMPTS}× attempts). Locked to human review.\n\nLatest findings (${report.checkedAt}):\n` + summary
+          : `Auto-rolled back by post-publish reviewer (${report.checkedAt}, attempt ${report.attempt}):\n` + summary,
+      meta: {
+        ...(item.meta as object),
+        autoFixExhausted: previousAttempts >= MAX_AUTO_FIX_ATTEMPTS,
+        lastFindings: highFindings as unknown as Prisma.InputJsonValue,
+      } as Prisma.InputJsonValue,
     },
   });
+  logger.warn(
+    { contentItemId, previousAttempts, type: item.type },
+    "post_review.escalated_to_human",
+  );
 }
 
 void Prompts; // keep the import live; reserved for future prompt sharing
