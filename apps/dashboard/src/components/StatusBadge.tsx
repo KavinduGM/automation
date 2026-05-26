@@ -9,6 +9,7 @@ const colors: Record<ContentStatus, string> = {
   self_critique:    "bg-blue-100 text-blue-800",
   review:           "bg-orange-100 text-orange-800",
   approved:         "bg-green-100 text-green-800",
+  scheduled:        "bg-indigo-100 text-indigo-800",
   publishing:       "bg-blue-100 text-blue-800",
   published:        "bg-emerald-100 text-emerald-800",
   rejected:         "bg-red-100 text-red-700",

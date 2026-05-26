@@ -12,7 +12,7 @@ export async function publishContentItem(contentItemId: string): Promise<void> {
     where: { id: contentItemId },
     include: { assets: { orderBy: { ord: "asc" } } },
   });
-  if (item.status !== "approved") {
+  if (item.status !== "approved" && item.status !== "scheduled") {
     logger.warn({ id: contentItemId, status: item.status }, "publish.skipped_not_approved");
     return;
   }

@@ -97,10 +97,18 @@ export default async function BusinessDetail({
     const period = String(formData.get("period")) as Period;
     const approvalMode = String(formData.get("approvalMode")) as ApprovalMode;
     const active = formData.get("active") === "on";
+    const timeSlotsRaw = String(formData.get("timeSlots") ?? "");
+    const timezone = String(formData.get("timezone") ?? "America/New_York").trim() || "America/New_York";
+    // Slots come in as a comma-separated "09:00, 13:00, 17:00" string. Empty
+    // input = legacy "publish ASAP" behavior.
+    const timeSlots = timeSlotsRaw
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => /^\d{1,2}:\d{2}$/.test(s));
     await prisma.contentPlan.upsert({
       where: { businessId_contentType: { businessId: business.id, contentType } },
-      create: { businessId: business.id, contentType, perPeriod, period, approvalMode, active },
-      update: { perPeriod, period, approvalMode, active },
+      create: { businessId: business.id, contentType, perPeriod, period, approvalMode, active, timeSlots, timezone },
+      update: { perPeriod, period, approvalMode, active, timeSlots, timezone },
     });
     redirect(`/businesses/${params.slug}?ok=plan`);
   }
@@ -250,27 +258,36 @@ export default async function BusinessDetail({
         <section className="card">
           <h2 className="font-medium mb-3">Content plans</h2>
           <div className="grid gap-2 text-xs mb-3">
-            {biz.contentPlans.map((p) => (
-              <div key={p.id} className="flex items-center justify-between gap-2 rounded bg-gray-50 px-2 py-1.5">
-                <span className="flex-1">
-                  <span className="font-medium">{p.contentType}</span> · {p.perPeriod}/{p.period} · {p.approvalMode} ·{" "}
-                  <span className={`badge ${p.active ? "bg-green-100 text-green-800" : "bg-gray-200 text-gray-700"}`}>
-                    {p.active ? "active" : "hold"}
+            {biz.contentPlans.map((p) => {
+              const slots = Array.isArray(p.timeSlots) ? (p.timeSlots as string[]) : [];
+              return (
+                <div key={p.id} className="flex items-center justify-between gap-2 rounded bg-gray-50 px-2 py-1.5">
+                  <span className="flex-1">
+                    <span className="font-medium">{p.contentType}</span> · {p.perPeriod}/{p.period} · {p.approvalMode} ·{" "}
+                    <span className={`badge ${p.active ? "bg-green-100 text-green-800" : "bg-gray-200 text-gray-700"}`}>
+                      {p.active ? "active" : "hold"}
+                    </span>
+                    {slots.length > 0 && (
+                      <span className="ml-1 text-gray-500">· slots {slots.join(", ")} ({p.timezone})</span>
+                    )}
+                    {slots.length === 0 && (
+                      <span className="ml-1 text-gray-400">· publish ASAP</span>
+                    )}
                   </span>
-                </span>
-                <div className="flex items-center gap-1">
-                  <a className="btn-ghost px-2 py-1 text-xs" href={`/businesses/${biz.slug}?editPlan=${p.id}`}>Edit</a>
-                  <form action={togglePlan}>
-                    <input type="hidden" name="id" value={p.id} />
-                    <button className="btn-ghost px-2 py-1 text-xs">{p.active ? "Hold" : "Activate"}</button>
-                  </form>
-                  <form action={deletePlan}>
-                    <input type="hidden" name="id" value={p.id} />
-                    <button className="btn-danger px-2 py-1 text-xs">Delete</button>
-                  </form>
+                  <div className="flex items-center gap-1">
+                    <a className="btn-ghost px-2 py-1 text-xs" href={`/businesses/${biz.slug}?editPlan=${p.id}`}>Edit</a>
+                    <form action={togglePlan}>
+                      <input type="hidden" name="id" value={p.id} />
+                      <button className="btn-ghost px-2 py-1 text-xs">{p.active ? "Hold" : "Activate"}</button>
+                    </form>
+                    <form action={deletePlan}>
+                      <input type="hidden" name="id" value={p.id} />
+                      <button className="btn-danger px-2 py-1 text-xs">Delete</button>
+                    </form>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
             {biz.contentPlans.length === 0 && <div className="text-gray-500">No plans yet — add one below.</div>}
           </div>
           <div className="border-t pt-3">
@@ -299,6 +316,28 @@ export default async function BusinessDetail({
                 <label className="label">Approval</label>
                 <select className="input" name="approvalMode" defaultValue={editingPlan?.approvalMode}>
                   {MODES.map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </div>
+              <div className="col-span-2">
+                <label className="label">Publish slots (comma-separated, in plan timezone)</label>
+                <input
+                  className="input"
+                  name="timeSlots"
+                  placeholder="09:00, 13:00, 17:00 — leave blank for ASAP"
+                  defaultValue={editingPlan && Array.isArray(editingPlan.timeSlots) ? (editingPlan.timeSlots as string[]).join(", ") : ""}
+                />
+                <div className="mt-1 text-xs text-gray-500">
+                  When set, articles are created at these wall-clock times daily. Past slots roll to tomorrow. <b>Slot count overrides Per period</b> — one article per slot per day.
+                </div>
+              </div>
+              <div className="col-span-2">
+                <label className="label">Timezone (IANA)</label>
+                <select className="input" name="timezone" defaultValue={editingPlan?.timezone ?? "America/New_York"}>
+                  <option value="America/New_York">America/New_York (Eastern)</option>
+                  <option value="America/Chicago">America/Chicago (Central)</option>
+                  <option value="America/Denver">America/Denver (Mountain)</option>
+                  <option value="America/Los_Angeles">America/Los_Angeles (Pacific)</option>
+                  <option value="UTC">UTC</option>
                 </select>
               </div>
               <label className="text-xs flex items-center gap-2 col-span-2">

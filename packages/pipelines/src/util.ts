@@ -1,6 +1,6 @@
 import slugify from "slugify";
 import { createHash } from "node:crypto";
-import { prisma, Prompts, type Business, type BrandKit, type ContentItem, type Prisma } from "@ca/shared";
+import { prisma, Prompts, queue, QUEUES, logger, type Business, type BrandKit, type ContentItem, type Prisma } from "@ca/shared";
 
 export function makeSlug(s: string): string {
   return slugify(s, { lower: true, strict: true, trim: true }).slice(0, 60);
@@ -46,4 +46,34 @@ export async function unusedTopicFor(businessId: string) {
 
 export async function markTopicUsed(id: string) {
   await prisma.topicCandidate.update({ where: { id }, data: { usedAt: new Date() } });
+}
+
+// Enqueue the publish job for an approved item, respecting any
+// scheduledAt slot on the ContentItem. If scheduledAt is in the future,
+// sets status="scheduled" and asks BullMQ to delay the job until that
+// instant; otherwise sets status="approved" and runs now. This is the
+// single chokepoint for all approval → publish transitions.
+export async function enqueuePublish(contentItemId: string): Promise<void> {
+  const item = await prisma.contentItem.findUniqueOrThrow({ where: { id: contentItemId } });
+  const now = Date.now();
+  const slotMs = item.scheduledAt?.getTime();
+  // Auto-fix retries should publish ASAP — their original slot is in the
+  // past by definition (the item was already published once). Treat any
+  // past scheduledAt as "publish now".
+  if (slotMs && slotMs > now) {
+    const delay = slotMs - now;
+    await setStatus(contentItemId, "scheduled");
+    await queue(QUEUES.publish).add(
+      "publish",
+      { contentItemId },
+      { delay, removeOnComplete: 500, removeOnFail: 100 },
+    );
+    logger.info(
+      { contentItemId, scheduledAt: item.scheduledAt?.toISOString(), delaySeconds: Math.round(delay / 1000) },
+      "enqueue_publish.deferred_to_slot",
+    );
+    return;
+  }
+  await setStatus(contentItemId, "approved");
+  await queue(QUEUES.publish).add("publish", { contentItemId });
 }

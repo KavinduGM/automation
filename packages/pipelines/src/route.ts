@@ -1,6 +1,6 @@
 import { prisma, Prompts, logger, type Prisma } from "@ca/shared";
 import { claude } from "@ca/providers";
-import { bumpCost, loadBrandContext, setStatus } from "./util.js";
+import { bumpCost, loadBrandContext, setStatus, enqueuePublish } from "./util.js";
 import { queue, QUEUES } from "@ca/shared";
 
 // Decides what happens after a piece is drafted: auto-publish, AI-review,
@@ -39,8 +39,7 @@ export async function routeApproval(contentItemId: string): Promise<void> {
   }
 
   if (mode === "auto") {
-    await setStatus(contentItemId, "approved");
-    await queue(QUEUES.publish).add("publish", { contentItemId });
+    await enqueuePublish(contentItemId);
     return;
   }
 
@@ -81,8 +80,7 @@ async function runAiReview(
         } as Prisma.InputJsonValue,
       },
     });
-    await setStatus(contentItemId, "approved");
-    await queue(QUEUES.publish).add("publish", { contentItemId });
+    await enqueuePublish(contentItemId);
     return;
   }
 
@@ -101,8 +99,7 @@ async function runAiReview(
 
   // Critic approved → publish.
   if (verdict.verdict === "approve") {
-    await setStatus(contentItemId, "approved");
-    await queue(QUEUES.publish).add("publish", { contentItemId });
+    await enqueuePublish(contentItemId);
     return;
   }
 
@@ -128,8 +125,7 @@ async function runAiReview(
           issuesSummary,
       },
     });
-    await setStatus(contentItemId, "approved");
-    await queue(QUEUES.publish).add("publish", { contentItemId });
+    await enqueuePublish(contentItemId);
     return;
   }
 

@@ -1,4 +1,5 @@
 import { prisma, queue, QUEUES } from "@ca/shared";
+import { enqueuePublish } from "@ca/pipelines";
 import { requireUser } from "@/lib/auth";
 import { Nav } from "@/components/Nav";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -76,9 +77,11 @@ export default async function ContentDetail({ params }: { params: { id: string }
     delete resetMeta.fixScope;
     await prisma.contentItem.update({
       where: { id: params.id },
-      data: { status: "approved", meta: resetMeta as object },
+      data: { meta: resetMeta as object },
     });
-    await queue(QUEUES.publish).add("publish", { contentItemId: params.id });
+    // enqueuePublish respects scheduledAt — admin re-approval publishes
+    // immediately (slot is in the past) which is what we want here.
+    await enqueuePublish(params.id);
     await prisma.auditLog.create({ data: { userId: user.id, businessId: item!.businessId, action: "approve", target: `ContentItem:${params.id}` } });
     redirect("/review");
   }
@@ -141,7 +144,15 @@ export default async function ContentDetail({ params }: { params: { id: string }
         <div className="flex items-center justify-between mb-4">
           <div>
             <h1 className="text-xl font-semibold">{item.title || "(untitled)"}</h1>
-            <div className="text-xs text-gray-500">{item.business.name} · {item.type} · v{item.version} · cost ${item.costUsd.toFixed(2)}</div>
+            <div className="text-xs text-gray-500">
+              {item.business.name} · {item.type} · v{item.version} · cost ${item.costUsd.toFixed(2)}
+              {item.scheduledAt && item.status === "scheduled" && (
+                <> · scheduled for <span className="font-medium">{item.scheduledAt.toISOString().replace("T", " ").slice(0, 16)} UTC</span></>
+              )}
+              {item.publishedAt && item.status === "published" && (
+                <> · published {item.publishedAt.toISOString().replace("T", " ").slice(0, 16)} UTC</>
+              )}
+            </div>
           </div>
           <StatusBadge status={item.status} />
         </div>

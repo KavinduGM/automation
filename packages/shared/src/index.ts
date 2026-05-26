@@ -6,4 +6,5 @@ export * from "./logger.js";
 export * from "./cost.js";
 export * from "./types.js";
 export * from "./brand-catalog.js";
+export * from "./scheduling.js";
 export * as Prompts from "./prompts/index.js";

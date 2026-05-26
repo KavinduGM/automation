@@ -99,6 +99,12 @@ model ContentPlan {
   period        Period      @default(day)
   approvalMode  ApprovalMode @default(human_review)
   active        Boolean     @default(true)
+  // Publish time slots — array of "HH:MM" strings in the plan's timezone.
+  // Length must match perPeriod when set. Empty array = publish ASAP (legacy).
+  // Example: ["09:00", "13:00", "17:00"] with timezone "America/New_York"
+  // gives morning/midday/late-afternoon US Eastern slots.
+  timeSlots     Json        @default("[]")
+  timezone      String      @default("America/New_York")
   updatedAt     DateTime    @updatedAt
 
   @@unique([businessId, contentType])
@@ -248,6 +254,7 @@ enum ContentStatus {
   self_critique
   review        // awaiting human approval
   approved
+  scheduled     // approved + waiting for ContentItem.scheduledAt to arrive
   publishing
   published
   rejected
