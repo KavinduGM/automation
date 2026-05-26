@@ -351,26 +351,34 @@ async function persistReport(contentItemId: string, report: ReviewReport) {
   });
 }
 
+// Classify a finding as image-related or text-related so the blog pipeline
+// can do the cheapest fix possible: regen text only when the issue is in
+// text, regen images only when the issue is in images.
+//   - image area + the marker_leak case for [[IMAGE_N]] → image issue
+//   - everything else (content, link, cta, structured_data, http, [[CTA:…]]) → text issue
+function classifyFinding(f: ReviewFinding): "image" | "text" {
+  if (f.area === "image") return "image";
+  if (f.area === "marker_leak" && /\[\[IMAGE_/.test(f.message)) return "image";
+  return "text";
+}
+
+export type FixScope = "text" | "images" | "both";
+
+function deriveFixScope(highFindings: ReviewFinding[]): FixScope {
+  let hasImage = false;
+  let hasText = false;
+  for (const f of highFindings) {
+    if (classifyFinding(f) === "image") hasImage = true;
+    else hasText = true;
+  }
+  if (hasImage && hasText) return "both";
+  if (hasImage) return "images";
+  return "text";
+}
+
 async function rollback(contentItemId: string, report: ReviewReport) {
   const item = await prisma.contentItem.findUnique({ where: { id: contentItemId } });
   if (!item || item.status !== "published") return;
-
-  // Remove the materialized published row so the live site stops serving it,
-  // THEN flush the client site's ISR cache so the index card disappears too
-  // (closes the SEO-poisoning gap where the card outlived its detail page).
-  switch (item.type) {
-    case "blog":         await prisma.post.deleteMany({ where: { contentItemId } }); break;
-    case "case_study":   await prisma.caseStudy.deleteMany({ where: { contentItemId } }); break;
-    case "resource":     await prisma.resource.deleteMany({ where: { contentItemId } }); break;
-    case "landing_page": await prisma.landingPage.deleteMany({ where: { contentItemId } }); break;
-  }
-  if (item.type === "blog" || item.type === "case_study" || item.type === "resource" || item.type === "landing_page") {
-    void revalidateForContent({
-      businessId: item.businessId,
-      type: item.type,
-      slug: item.slug,
-    }).catch((err) => logger.warn({ err, contentItemId }, "rollback.revalidate_failed"));
-  }
 
   // Count how many auto-fix attempts have already happened on this item.
   const meta = (item.meta ?? {}) as { autoFixAttempts?: number };
@@ -380,58 +388,110 @@ async function rollback(contentItemId: string, report: ReviewReport) {
   const highFindings = report.findings.filter((f) => f.severity === "high");
   const summary = highFindings.map((f) => `- [${f.area}] ${f.message}`).join("\n");
 
-  // Auto-fix loop: only for blogs (the only pipeline that takes findings
-  // feedback right now). Other types go straight to human review.
-  const canAutoFix =
-    item.type === "blog" && previousAttempts < MAX_AUTO_FIX_ATTEMPTS;
-
-  if (canAutoFix) {
+  // ── Give-up path ─────────────────────────────────────────────────────
+  // After MAX_AUTO_FIX_ATTEMPTS the rule is: leave it published as-is and
+  // stop reviewing. No rollback, no human escalation. Future republishes
+  // (e.g. if a human edits and re-approves) also skip post-review thanks
+  // to meta.skipPostReview.
+  if (previousAttempts >= MAX_AUTO_FIX_ATTEMPTS) {
     await prisma.contentItem.update({
       where: { id: contentItemId },
       data: {
-        status: "queued",
         reviewNotes:
-          `Auto-rolled back (attempt ${report.attempt}). Auto-fix retry ${nextAttempt}/${MAX_AUTO_FIX_ATTEMPTS} starting…\n` + summary,
+          `Auto-fix exhausted (${MAX_AUTO_FIX_ATTEMPTS}× attempts). Left published as-is — no further review.\n\nLatest findings (${report.checkedAt}):\n` + summary,
         meta: {
           ...(item.meta as object),
-          autoFixAttempts: nextAttempt,
+          autoFixGivenUp: true,
+          skipPostReview: true,
           lastFindings: highFindings as unknown as Prisma.InputJsonValue,
         } as Prisma.InputJsonValue,
       },
     });
-    // Re-enqueue the draft pipeline. The blog pipeline reads
-    // item.meta.lastFindings and feeds them to Claude as corrective context.
-    await queue(QUEUES.draft).add(
-      `${item.type}:${contentItemId}:autofix:${nextAttempt}`,
-      { contentItemId, type: item.type },
-    );
-    logger.info(
-      { contentItemId, attempt: nextAttempt, findings: highFindings.length },
-      "post_review.auto_fix_enqueued",
+    logger.warn(
+      { contentItemId, previousAttempts, type: item.type },
+      "post_review.given_up_left_published",
     );
     return;
   }
 
-  // Locked to human review.
+  // ── Auto-fix path (attempts 1 and 2) ─────────────────────────────────
+  // Only blogs auto-fix today; other types fall through to human review.
+  const canAutoFix = item.type === "blog";
+
+  if (!canAutoFix) {
+    // Non-blog: roll back the published row + escalate to human review.
+    await deleteMaterialized(item);
+    await prisma.contentItem.update({
+      where: { id: contentItemId },
+      data: {
+        status: "review",
+        reviewNotes:
+          `Auto-rolled back by post-publish reviewer (${report.checkedAt}, attempt ${report.attempt}):\n` + summary,
+        meta: {
+          ...(item.meta as object),
+          lastFindings: highFindings as unknown as Prisma.InputJsonValue,
+        } as Prisma.InputJsonValue,
+      },
+    });
+    logger.warn({ contentItemId, type: item.type }, "post_review.escalated_to_human_non_blog");
+    return;
+  }
+
+  // Blog auto-fix: classify findings to drive cheapest possible regen.
+  const fixScope = deriveFixScope(highFindings);
+
+  // For text-only fixes, leave the published page UP while we regenerate —
+  // a broken image marker (rare) is worse to leave up than a missing brand
+  // mention, so only roll back the live row for image-scope or both-scope.
+  if (fixScope === "images" || fixScope === "both") {
+    await deleteMaterialized(item);
+  }
+
   await prisma.contentItem.update({
     where: { id: contentItemId },
     data: {
-      status: "review",
+      status: "queued",
       reviewNotes:
-        previousAttempts >= MAX_AUTO_FIX_ATTEMPTS
-          ? `Auto-fix exhausted (${MAX_AUTO_FIX_ATTEMPTS}× attempts). Locked to human review.\n\nLatest findings (${report.checkedAt}):\n` + summary
-          : `Auto-rolled back by post-publish reviewer (${report.checkedAt}, attempt ${report.attempt}):\n` + summary,
+        `Auto-fix ${nextAttempt}/${MAX_AUTO_FIX_ATTEMPTS} (scope: ${fixScope}) — ${report.checkedAt}\n` + summary,
       meta: {
         ...(item.meta as object),
-        autoFixExhausted: previousAttempts >= MAX_AUTO_FIX_ATTEMPTS,
+        autoFixAttempts: nextAttempt,
+        fixScope,
         lastFindings: highFindings as unknown as Prisma.InputJsonValue,
       } as Prisma.InputJsonValue,
     },
   });
-  logger.warn(
-    { contentItemId, previousAttempts, type: item.type },
-    "post_review.escalated_to_human",
+  await queue(QUEUES.draft).add(
+    `${item.type}:${contentItemId}:autofix:${nextAttempt}`,
+    { contentItemId, type: item.type },
   );
+  logger.info(
+    { contentItemId, attempt: nextAttempt, fixScope, findings: highFindings.length },
+    "post_review.auto_fix_enqueued",
+  );
+}
+
+// Take down the materialized row and flush the client site's ISR cache so
+// neither the detail page nor any /blog index card outlives the takedown.
+async function deleteMaterialized(item: {
+  id: string;
+  type: string;
+  businessId: string;
+  slug: string | null;
+}) {
+  switch (item.type) {
+    case "blog":         await prisma.post.deleteMany({ where: { contentItemId: item.id } }); break;
+    case "case_study":   await prisma.caseStudy.deleteMany({ where: { contentItemId: item.id } }); break;
+    case "resource":     await prisma.resource.deleteMany({ where: { contentItemId: item.id } }); break;
+    case "landing_page": await prisma.landingPage.deleteMany({ where: { contentItemId: item.id } }); break;
+  }
+  if (item.type === "blog" || item.type === "case_study" || item.type === "resource" || item.type === "landing_page") {
+    void revalidateForContent({
+      businessId: item.businessId,
+      type: item.type as "blog" | "case_study" | "resource" | "landing_page",
+      slug: item.slug,
+    }).catch((err) => logger.warn({ err, contentItemId: item.id }, "rollback.revalidate_failed"));
+  }
 }
 
 void Prompts; // keep the import live; reserved for future prompt sharing

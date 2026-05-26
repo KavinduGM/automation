@@ -17,6 +17,29 @@ function assetPreviewUrl(path: string | null | undefined): string | null {
   return `${ASSETS_BASE}/${cleaned}`;
 }
 
+// Map a finding message to literal line numbers in the body so the human
+// reviewer can jump to the problem area in the textarea. Recognizes the
+// concrete patterns the post-review checks for: leaked template markers,
+// em/en dashes. Returns an empty list when the finding doesn't reference a
+// specific token (e.g. "Article has zero <img> tags").
+function findLocations(message: string, body: string): number[] {
+  const patterns: RegExp[] = [];
+  if (/\[\[IMAGE_/.test(message)) patterns.push(/\[\[IMAGE_\d+\]\]/g);
+  if (/\[\[CTA/.test(message)) patterns.push(/\[\[CTA:[^\]]+\]\]/g);
+  if (/em dash/i.test(message)) patterns.push(/[—–]/g);
+  if (patterns.length === 0) return [];
+  const lines = body.split("\n");
+  const hits: number[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? "";
+    if (patterns.some((re) => { re.lastIndex = 0; return re.test(line); })) {
+      hits.push(i + 1);
+      if (hits.length >= 10) break;
+    }
+  }
+  return hits;
+}
+
 export default async function ContentDetail({ params }: { params: { id: string } }) {
   const user = await requireUser();
   const item = await prisma.contentItem.findUnique({
@@ -111,12 +134,90 @@ export default async function ContentDetail({ params }: { params: { id: string }
           <StatusBadge status={item.status} />
         </div>
 
-        {item.reviewNotes && (
-          <div className="card mb-4 bg-orange-50 border-orange-200 text-sm whitespace-pre-wrap">
-            <div className="font-medium mb-1 text-orange-900">Review notes</div>
-            {item.reviewNotes}
-          </div>
-        )}
+        {(() => {
+          const meta = (item.meta ?? {}) as {
+            postReview?: { overall?: string; checkedAt?: string; findings?: Array<{ area: string; message: string; severity: string }> };
+            lastFindings?: Array<{ area: string; message: string; severity?: string }>;
+            imageErrors?: Array<{ ord: number; prompt: string; message: string }>;
+            imagesGenerated?: number;
+            imagesAttempted?: number;
+            autoFixAttempts?: number;
+            autoFixGivenUp?: boolean;
+            fixScope?: "text" | "images" | "both";
+          };
+          const findings = meta.lastFindings ?? meta.postReview?.findings ?? [];
+          const showFindings = findings.length > 0;
+          const imgErrors = meta.imageErrors ?? [];
+          return (
+            <>
+              {meta.autoFixAttempts !== undefined && meta.autoFixAttempts > 0 && (
+                <div className="card mb-4 bg-orange-50 border-orange-200 text-sm">
+                  <div className="font-medium mb-1 text-orange-900">
+                    Auto-fix history
+                  </div>
+                  <div className="text-orange-800">
+                    {meta.autoFixGivenUp
+                      ? `Gave up after ${meta.autoFixAttempts} attempts — left published as-is.`
+                      : `Attempt ${meta.autoFixAttempts}/2 · scope: ${meta.fixScope ?? "both"}`}
+                  </div>
+                </div>
+              )}
+
+              {showFindings && (
+                <div className="card mb-4 bg-red-50 border-red-200 text-sm">
+                  <div className="font-medium mb-2 text-red-900">
+                    Post-review findings ({findings.length})
+                  </div>
+                  <ul className="space-y-1">
+                    {findings.map((f, idx) => {
+                      const sev = (f as { severity?: string }).severity ?? "med";
+                      const sevBg = sev === "high" ? "bg-red-200 text-red-900" : sev === "med" ? "bg-orange-200 text-orange-900" : "bg-gray-200 text-gray-800";
+                      const area = (f as { area?: string }).area ?? "issue";
+                      const message = (f as { message?: string }).message ?? "";
+                      const locations = findLocations(message, item.bodyMd);
+                      return (
+                        <li key={idx} className="text-xs">
+                          <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium mr-2 ${sevBg}`}>
+                            {sev}
+                          </span>
+                          <span className="text-gray-500">[{area}]</span> {message}
+                          {locations.length > 0 && (
+                            <span className="ml-2 text-red-700">
+                              · found at line{locations.length > 1 ? "s" : ""} {locations.join(", ")}
+                            </span>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
+
+              {imgErrors.length > 0 && (
+                <div className="card mb-4 bg-red-50 border-red-200 text-sm">
+                  <div className="font-medium mb-2 text-red-900">
+                    Image generation errors ({imgErrors.length}/{meta.imagesAttempted ?? "?"} failed
+                    {meta.imagesGenerated !== undefined && ` · ${meta.imagesGenerated} succeeded`})
+                  </div>
+                  <ul className="space-y-1 text-xs">
+                    {imgErrors.map((e, idx) => (
+                      <li key={idx}>
+                        <span className="text-gray-500">image #{e.ord}:</span> {e.message}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {item.reviewNotes && !showFindings && (
+                <div className="card mb-4 bg-orange-50 border-orange-200 text-sm whitespace-pre-wrap">
+                  <div className="font-medium mb-1 text-orange-900">Review notes</div>
+                  {item.reviewNotes}
+                </div>
+              )}
+            </>
+          );
+        })()}
 
         <form action={save} className="card space-y-3">
           <div>

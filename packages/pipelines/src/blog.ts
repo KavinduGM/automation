@@ -46,6 +46,28 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
 
   const { business, brandBlock } = await loadBrandContext(item.businessId);
 
+  // Auto-fix scope drives which steps to run. First run is always "both".
+  //   - "text"   → regen outline + draft, KEEP existing images (cheap text fix)
+  //   - "images" → skip outline + draft, only regen images (saves Claude $)
+  //   - "both"   → full pipeline
+  const itemMeta = (item.meta ?? {}) as {
+    autoFixAttempts?: number;
+    lastFindings?: Array<{ area: string; message: string }>;
+    fixScope?: "text" | "images" | "both";
+    outline?: BlogOutline;
+  };
+  const autoFixAttempt = itemMeta.autoFixAttempts ?? 0;
+  const fixScope: "text" | "images" | "both" =
+    autoFixAttempt > 0 ? (itemMeta.fixScope ?? "both") : "both";
+
+  // Image-only fast path: reuse existing outline + body, just regen images.
+  if (fixScope === "images") {
+    await regenImagesOnly(contentItemId, business, itemMeta.outline);
+    await setStatus(contentItemId, "self_critique");
+    await routeApproval(contentItemId);
+    return;
+  }
+
   // 1. Get a topic
   await setStatus(contentItemId, "researching");
   let topicTitle = item.title;
@@ -142,8 +164,6 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
   // Auto-fix mode: if this is a retry after a post-publish rollback, the
   // previous high-severity findings are stored on the item. We feed them
   // to Claude so it knows what to correct.
-  const itemMeta = (item.meta ?? {}) as { autoFixAttempts?: number; lastFindings?: Array<{ area: string; message: string }> };
-  const autoFixAttempt = itemMeta.autoFixAttempts ?? 0;
   const correctionContext = autoFixAttempt > 0 && itemMeta.lastFindings?.length
     ? buildCorrectionContext(autoFixAttempt, itemMeta.lastFindings)
     : "";
@@ -167,19 +187,66 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
 
   // 4. Images — generate each one and store with the index encoded in `ord`
   //    so the publish layer can map [[IMAGE_N]] markers → real URLs.
+  //    Skipped on text-only auto-fixes; existing assets carry over.
+  if (fixScope === "text") {
+    logger.info({ contentItemId, autoFixAttempt }, "blog.skipping_images_text_only_fix");
+  } else {
+    await runImageGeneration(contentItemId, business.id, business.slug, slug, outline.imagePrompts ?? []);
+  }
+
+  // 5. Self-critique → route
+  await setStatus(contentItemId, "self_critique");
+  await routeApproval(contentItemId);
+}
+
+// Image-only auto-fix: keep existing outline + body, delete old image assets
+// (so the new ones replace them cleanly), and regenerate using the saved
+// outline.imagePrompts. If the saved outline is missing (legacy items), this
+// falls through to a no-op + warning so we don't crash; the routeApproval
+// still runs and the item proceeds.
+async function regenImagesOnly(
+  contentItemId: string,
+  business: { id: string; slug: string },
+  savedOutline: BlogOutline | undefined,
+): Promise<void> {
   await setStatus(contentItemId, "generating_media");
-  const imagePrompts = (outline.imagePrompts ?? []).slice(0, 5);
-  for (const [i, ip] of imagePrompts.entries()) {
+  if (!savedOutline?.imagePrompts?.length) {
+    logger.warn({ contentItemId }, "blog.regen_images_only_missing_outline");
+    return;
+  }
+  // Wipe existing image assets so the new generation replaces them.
+  await prisma.asset.deleteMany({
+    where: { contentItemId, kind: "image" },
+  });
+  const item = await prisma.contentItem.findUniqueOrThrow({ where: { id: contentItemId } });
+  const slug = item.slug ?? makeSlug(item.title);
+  await runImageGeneration(contentItemId, business.id, business.slug, slug, savedOutline.imagePrompts);
+}
+
+// Run the image generation loop and capture any per-image errors visibly on
+// meta.imageErrors so they're debuggable from the dashboard instead of only
+// surfacing as a marker_leak finding after post-review.
+async function runImageGeneration(
+  contentItemId: string,
+  businessId: string,
+  businessSlug: string,
+  slug: string,
+  imagePrompts: BlogOutline["imagePrompts"],
+): Promise<void> {
+  await setStatus(contentItemId, "generating_media");
+  const errors: Array<{ ord: number; prompt: string; message: string }> = [];
+  let succeeded = 0;
+  for (const [i, ip] of imagePrompts.slice(0, 5).entries()) {
     try {
       const img = await generateImage({
         prompt: ip.prompt,
         quality: ip.placement === "hero" ? "high" : "medium",
-        businessSlug: business.slug,
+        businessSlug,
         filenameHint: `${slug}-${i}`,
       });
       await prisma.asset.create({
         data: {
-          businessId: business.id,
+          businessId,
           contentItemId,
           kind: "image",
           path: img.relPath,
@@ -191,14 +258,33 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
         },
       });
       await bumpCost(contentItemId, img.costUsd);
+      succeeded += 1;
     } catch (err) {
-      logger.error({ err, prompt: ip.prompt }, "blog.image_failed");
+      const message = (err as Error).message ?? String(err);
+      logger.error({ err, prompt: ip.prompt, ord: i }, "blog.image_failed");
+      errors.push({ ord: i, prompt: ip.prompt, message });
     }
   }
-
-  // 5. Self-critique → route
-  await setStatus(contentItemId, "self_critique");
-  await routeApproval(contentItemId);
+  // Persist the error list (and clear it on success) so the dashboard can
+  // show "2/4 images failed: <reason>" instead of mysteriously missing media.
+  const current = await prisma.contentItem.findUniqueOrThrow({ where: { id: contentItemId } });
+  await prisma.contentItem.update({
+    where: { id: contentItemId },
+    data: {
+      meta: {
+        ...(current.meta as object),
+        imageErrors: errors as unknown as Prisma.InputJsonValue,
+        imagesGenerated: succeeded,
+        imagesAttempted: Math.min(imagePrompts.length, 5),
+      } as Prisma.InputJsonValue,
+    },
+  });
+  if (errors.length > 0) {
+    logger.warn(
+      { contentItemId, failed: errors.length, succeeded },
+      "blog.image_generation_partial",
+    );
+  }
 }
 
 // Checks the outline JSON against the hard-locked structure contract.

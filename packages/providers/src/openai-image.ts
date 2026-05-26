@@ -29,10 +29,14 @@ export interface GenerateImageResult {
 
 export async function generateImage(input: GenerateImageInput): Promise<GenerateImageResult> {
   const quality = input.quality ?? "medium";
-  const res = await client().images.generate({
+  // Pass quality through to the API — without it gpt-image-1 picks "auto"
+  // (cheap/standard tier) regardless of what we computed cost against,
+  // which is why "high" quality was billing without higher fidelity.
+  const res = await (client().images.generate as (args: Record<string, unknown>) => Promise<{ data?: Array<{ b64_json?: string }> }>)({
     model: env().OPENAI_IMAGE_MODEL,
     prompt: input.prompt,
     size: input.size ?? "1536x1024",
+    quality,
     // gpt-image-1 returns b64_json by default.
     n: 1,
   });

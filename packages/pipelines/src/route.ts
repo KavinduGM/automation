@@ -17,7 +17,19 @@ export async function routeApproval(contentItemId: string): Promise<void> {
   const plan = await prisma.contentPlan.findUnique({
     where: { businessId_contentType: { businessId: item.businessId, contentType: item.type } },
   });
-  const mode = plan?.approvalMode ?? "human_review";
+
+  // Auto-fix retries bypass the configured approval mode and re-publish
+  // directly. The human (or AI critic) already approved the item the first
+  // time around; the auto-fix loop just corrects what the post-publish
+  // reviewer flagged, so funneling it back through human/ai review would
+  // stall the loop indefinitely.
+  const itemMeta = (item.meta ?? {}) as { autoFixAttempts?: number };
+  const isAutoFix = (itemMeta.autoFixAttempts ?? 0) > 0;
+  const mode = isAutoFix ? "auto" : (plan?.approvalMode ?? "human_review");
+
+  if (isAutoFix) {
+    logger.info({ contentItemId, attempt: itemMeta.autoFixAttempts }, "route.auto_fix_bypassing_approval");
+  }
 
   if (mode === "auto") {
     await setStatus(contentItemId, "approved");
