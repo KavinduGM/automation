@@ -1,4 +1,4 @@
-import { prisma, seal, open } from "@ca/shared";
+import { prisma, seal, open, queue, QUEUES } from "@ca/shared";
 import { requireUser } from "@/lib/auth";
 import { Nav } from "@/components/Nav";
 import { notFound, redirect } from "next/navigation";
@@ -24,6 +24,8 @@ const OK_MESSAGES: Record<string, string> = {
   freshOn: "Fresh research enabled — Grok will run per article for this topic.",
   freshOff: "Fresh research disabled.",
   topicCandidateDeleted: "Topic deleted.",
+  researchEnqueued: "Research job enqueued — check the Jobs page in a minute.",
+  draftEnqueued: "Test draft enqueued — it will publish ASAP (slot ignored for test mode).",
 };
 
 export default async function BusinessDetail({
@@ -203,6 +205,27 @@ export default async function BusinessDetail({
     redirect(`/businesses/${params.slug}?ok=integrationDeleted`);
   }
 
+  async function runResearchNow() {
+    "use server";
+    const business = await prisma.business.findUniqueOrThrow({ where: { slug: params.slug } });
+    await queue(QUEUES.research).add(`research:manual:${Date.now()}`, { businessId: business.id });
+    redirect(`/businesses/${params.slug}?ok=researchEnqueued`);
+  }
+
+  // Create a ContentItem and immediately enqueue draft, bypassing slots
+  // and content plans. scheduledAt left null so enqueuePublish treats it
+  // as publish-ASAP at the end of the pipeline. For test mode only.
+  async function draftTestNow(formData: FormData) {
+    "use server";
+    const business = await prisma.business.findUniqueOrThrow({ where: { slug: params.slug } });
+    const type = String(formData.get("type") ?? "blog") as ContentType;
+    const item = await prisma.contentItem.create({
+      data: { businessId: business.id, type, status: "queued" },
+    });
+    await queue(QUEUES.draft).add(`${type}:${item.id}:test`, { contentItemId: item.id, type });
+    redirect(`/content/${item.id}?ok=draftEnqueued`);
+  }
+
   return (
     <div className="flex">
       <Nav businessSlug={biz.slug} />
@@ -217,6 +240,28 @@ export default async function BusinessDetail({
             {okMsg}
           </div>
         )}
+
+        {/* ── Test actions ─────────────────────────────────────────── */}
+        <section className="card border-blue-200 bg-blue-50/40">
+          <h2 className="font-medium mb-1">Test mode</h2>
+          <p className="text-xs text-gray-600 mb-3">
+            Run jobs on demand instead of waiting for the 04:00 UTC research cron or a scheduled slot. Use this to verify the pipeline end-to-end before letting automation drive.
+          </p>
+          <div className="flex flex-wrap items-center gap-3">
+            <form action={runResearchNow}>
+              <button className="btn-primary text-xs">Run research now</button>
+            </form>
+            <form action={draftTestNow} className="flex items-center gap-2">
+              <select className="input text-xs" name="type" defaultValue="blog">
+                {CONTENT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+              <button className="btn-primary text-xs">Draft one now (ASAP)</button>
+            </form>
+          </div>
+          <div className="mt-2 text-xs text-gray-500">
+            <b>Run research now</b> kicks off all active Topic Sources for this business and adds new candidates. <b>Draft one now</b> creates a single ContentItem and publishes it ASAP, ignoring any time slots — slots are only honored by the per-minute scheduler tick.
+          </div>
+        </section>
 
         {/* ── Brand kit ─────────────────────────────────────────────── */}
         <section className="card">
