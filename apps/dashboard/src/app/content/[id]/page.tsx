@@ -65,7 +65,19 @@ export default async function ContentDetail({ params }: { params: { id: string }
 
   async function approve() {
     "use server";
-    await prisma.contentItem.update({ where: { id: params.id }, data: { status: "approved" } });
+    // Reset the layout-fix counter so the next post-publish review gives a
+    // fresh 2 attempts. Without this, an item escalated to admin would be
+    // re-escalated on the very next post-review with no chance to fix.
+    const current = await prisma.contentItem.findUniqueOrThrow({ where: { id: params.id } });
+    const currentMeta = (current.meta ?? {}) as Record<string, unknown>;
+    const resetMeta = { ...currentMeta };
+    delete resetMeta.autoFixAttempts;
+    delete resetMeta.layoutFixExhausted;
+    delete resetMeta.fixScope;
+    await prisma.contentItem.update({
+      where: { id: params.id },
+      data: { status: "approved", meta: resetMeta as object },
+    });
     await queue(QUEUES.publish).add("publish", { contentItemId: params.id });
     await prisma.auditLog.create({ data: { userId: user.id, businessId: item!.businessId, action: "approve", target: `ContentItem:${params.id}` } });
     redirect("/review");
@@ -141,8 +153,10 @@ export default async function ContentDetail({ params }: { params: { id: string }
             imageErrors?: Array<{ ord: number; prompt: string; message: string }>;
             imagesGenerated?: number;
             imagesAttempted?: number;
-            autoFixAttempts?: number;
-            autoFixGivenUp?: boolean;
+            autoFixAttempts?: number;        // layout-fix counter
+            contentFixAttempts?: number;     // pre-publish critic counter
+            layoutFixExhausted?: boolean;
+            contentFixGivenUp?: boolean;
             fixScope?: "text" | "images" | "both";
           };
           const findings = meta.lastFindings ?? meta.postReview?.findings ?? [];
@@ -150,14 +164,27 @@ export default async function ContentDetail({ params }: { params: { id: string }
           const imgErrors = meta.imageErrors ?? [];
           return (
             <>
+              {meta.contentFixAttempts !== undefined && meta.contentFixAttempts > 0 && (
+                <div className="card mb-4 bg-orange-50 border-orange-200 text-sm">
+                  <div className="font-medium mb-1 text-orange-900">
+                    Content fix history (pre-publish AI critic)
+                  </div>
+                  <div className="text-orange-800">
+                    {meta.contentFixGivenUp
+                      ? `Exhausted after ${meta.contentFixAttempts}/2 attempts — published anyway.`
+                      : `Attempt ${meta.contentFixAttempts}/2 in progress.`}
+                  </div>
+                </div>
+              )}
+
               {meta.autoFixAttempts !== undefined && meta.autoFixAttempts > 0 && (
                 <div className="card mb-4 bg-orange-50 border-orange-200 text-sm">
                   <div className="font-medium mb-1 text-orange-900">
-                    Auto-fix history
+                    Layout fix history (post-publish reviewer)
                   </div>
                   <div className="text-orange-800">
-                    {meta.autoFixGivenUp
-                      ? `Gave up after ${meta.autoFixAttempts} attempts — left published as-is.`
+                    {meta.layoutFixExhausted
+                      ? `Exhausted after ${meta.autoFixAttempts}/2 attempts — UNPUBLISHED, awaiting your approval.`
                       : `Attempt ${meta.autoFixAttempts}/2 · scope: ${meta.fixScope ?? "both"}`}
                   </div>
                 </div>

@@ -1,36 +1,37 @@
-// Post-publish review.
+// Post-publish LAYOUT review.
 //
-// Triggered ~3 minutes after a successful publish (ISR cache + safety
-// margin). Fetches the rendered HTML for the live page and runs two layers
-// of checks:
+// This pass is intentionally layout-only — text content quality is the AI
+// critic's job pre-publish ([packages/pipelines/src/route.ts]). Here we
+// fetch the rendered HTML for the live page and assert that the page LOOKS
+// right: images render, CTAs are present, FAQ JSON-LD wired up, no broken
+// markers leaked through the renderer.
 //
-//   Layer 1 — deterministic heuristics
-//     - HTTP 200, valid HTML returned
-//     - Every <img> resolves (HEAD ≤ 400)
-//     - Body contains the article H1
-//     - At least one /services/ and one /contact link present
-//     - At least one InlineCTABanner-like CTA marker rendered
-//     - JSON-LD blocks present (BlogPosting + FAQPage when applicable)
-//     - Stray [[IMAGE_N]] or [[CTA: …]] markers NOT visible in body
-//
-//   Layer 2 — Claude pass
-//     - Reads the body text + heuristic findings + the source bodyMd
-//     - Returns severity + free-form notes
+// Checks (all deterministic, no Claude call):
+//   - HTTP 200, valid HTML returned
+//   - Every <img> resolves (HEAD ≤ 400)
+//   - Body contains an <h1>
+//   - At least one /services/ and one /contact internal link
+//   - InlineCTABanner-like CTA marker rendered
+//   - BlogPosting JSON-LD present
+//   - No leaked [[IMAGE_N]] or [[CTA: …]] markers visible
 //
 // Outcome:
-//   - "ok"        → ContentItem.meta.review = { ok: true, ... }, audit log.
-//   - "warnings"  → status stays `published`, notes saved on ContentItem.
-//   - "critical"  → auto-rolls back (status → review), notes saved, brand
-//                   pages stop serving the broken post.
+//   - "ok"       → ContentItem.meta.postReview = { ok: true, ... }, audit log.
+//   - "warnings" → stays published, notes saved (cosmetic only).
+//   - "critical" → UNPUBLISH immediately + auto-fix retry. After
+//                  MAX_AUTO_FIX_ATTEMPTS still-broken cycles, stay
+//                  unpublished and escalate to the human review queue
+//                  (status → review, meta.layoutFixExhausted = true).
+//                  Layout issues are never left live — they damage brand.
 //
 // 404 retry: if the live URL returns 4xx (almost always a stale ISR cache
 // from a previously-failed publish), the reviewer re-enqueues itself with a
 // short delay before giving up. Three tries total.
 
-import { prisma, logger, queue, QUEUES, brandSiteFor, Prompts, type Prisma } from "@ca/shared";
-import { claude, revalidateForContent } from "@ca/providers";
+import { prisma, logger, queue, QUEUES, brandSiteFor, type Prisma } from "@ca/shared";
+import { revalidateForContent } from "@ca/providers";
 
-// How many auto-fix attempts to allow before locking to human review.
+// How many layout-fix attempts to allow before escalating to admin.
 const MAX_AUTO_FIX_ATTEMPTS = 2;
 
 export interface PostReviewJobData {
@@ -174,55 +175,10 @@ export async function runPostReview(data: PostReviewJobData): Promise<ReviewRepo
     }
   }
 
-  // ── Brand-mention check — use the source bodyMd from the DB ─────────
-  // The HTML extract is truncated at 6000 chars for Claude, so brand
-  // mentions deep in the body get missed. The DB row is authoritative.
-  // (Heuristic, not Claude — saves a model call and is exact.)
-  const dbItem = await prisma.contentItem.findUnique({
-    where: { id: data.contentItemId },
-    include: { business: true },
-  });
-  if (dbItem) {
-    const brand = brandSiteFor(dbItem.business.slug);
-    if (brand) {
-      const body = dbItem.bodyMd ?? "";
-      const mentions = countOccurrences(body, brand.brandName);
-      if (mentions < 2) {
-        findings.push({
-          severity: "med",
-          area: "content",
-          message: `Brand "${brand.brandName}" mentioned only ${mentions}× in body (target ≥ 2)`,
-        });
-      }
-    }
-  }
-
-  // ── Layer 2: Claude content sanity pass (text-only, cheap) ─────────
-  // Now reviews the FULL bodyMd from the database, not a truncated HTML
-  // extract, so it can see the end of the article and judge truncation
-  // accurately.
-  if (html && dbItem) {
-    try {
-      const bodyText = (dbItem.bodyMd ?? "").slice(0, 12000);
-      const claudeRes = await claude<{ severity: "ok" | "warnings" | "critical"; notes: string }>({
-        model: "routing",
-        json: true,
-        maxTokens: 800,
-        system: REVIEWER_SYSTEM,
-        user:
-          `Heuristic findings so far:\n` +
-          JSON.stringify(findings, null, 2) +
-          `\n\nFull body markdown (authoritative — use this to judge truncation/off-topic, NOT the rendered HTML extract):\n"""${bodyText}"""\n\nReturn JSON only.`,
-      });
-      if (claudeRes.json?.severity === "critical") {
-        findings.push({ severity: "high", area: "content", message: `AI review: ${claudeRes.json.notes}` });
-      } else if (claudeRes.json?.severity === "warnings") {
-        findings.push({ severity: "med", area: "content", message: `AI review: ${claudeRes.json.notes}` });
-      }
-    } catch (err) {
-      logger.warn({ err }, "post_review.claude_pass_skipped");
-    }
-  }
+  // Brand-mention, truncation, em-dash, and off-topic checks moved to the
+  // pre-publish AI critic in route.ts — those are content concerns and
+  // should be caught/fixed BEFORE we ever go live. Post-publish review is
+  // layout-only.
 
   const high = findings.filter((f) => f.severity === "high").length;
   const med = findings.filter((f) => f.severity === "med").length;
@@ -248,37 +204,6 @@ export async function runPostReview(data: PostReviewJobData): Promise<ReviewRepo
   );
   return report;
 }
-
-const REVIEWER_SYSTEM = `You are a strict editor reviewing an automation-published B2B SaaS blog post.
-
-You receive (a) deterministic heuristic findings already gathered and (b) the FULL article body markdown
-(authoritative — judge truncation/off-topic from this, not from any rendered HTML).
-
-Critical-fail signals (return "critical"):
-  - Body is genuinely truncated (sentence cut off mid-word with no closing punctuation; FAQ heading
-    present but FAQ items missing or incomplete; abrupt halt mid-paragraph).
-    Note: a complete article that simply doesn't end with the brand name is NOT truncated.
-  - Article is clearly off-topic from its title.
-  - Visible template markers in body (any literal "[[…]]" tokens including [[IMAGE_N]] or [[CTA:…]]).
-  - Multiple raw markdown leaks (literal "**", "##", "[text](url)" shown as text).
-  - Em dashes anywhere ("—" is forbidden by brand style).
-
-Warnings (return "warnings"):
-  - Brand name not mentioned in body (we already check this deterministically; only flag if you see
-    something specifically wrong about how it's used, e.g. only in the FAQ).
-  - Weak / generic CTA text.
-  - Repeated phrasing across sections.
-
-If neither of those, return "ok".
-
-Be careful: the "heuristic findings" may be empty or all "med". That alone is not critical-fail.
-Only escalate to "critical" when YOU see something genuinely broken in the body.
-
-Output JSON only:
-{
-  "severity": "ok" | "warnings" | "critical",
-  "notes":    string   // 1-3 sentences naming the worst issue
-}`;
 
 // Build the canonical public URL for a content item on its business's site.
 // Only blogs/case-studies/resources/landing-pages have public URLs we can review.
@@ -321,12 +246,6 @@ function bustCache(url: string): string {
 
 function shorten(s: string, n = 80): string {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
-}
-
-function countOccurrences(haystack: string, needle: string): number {
-  if (!needle) return 0;
-  const re = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-  return (haystack.match(re) ?? []).length;
 }
 
 async function persistReport(contentItemId: string, report: ReviewReport) {
@@ -380,7 +299,11 @@ async function rollback(contentItemId: string, report: ReviewReport) {
   const item = await prisma.contentItem.findUnique({ where: { id: contentItemId } });
   if (!item || item.status !== "published") return;
 
-  // Count how many auto-fix attempts have already happened on this item.
+  // Layout issues damage the brand — always take the page down first.
+  await deleteMaterialized(item);
+
+  // Count how many layout-fix attempts have already happened on this item.
+  // (Field is still named autoFixAttempts for backwards compat with any in-flight rows.)
   const meta = (item.meta ?? {}) as { autoFixAttempts?: number };
   const previousAttempts = meta.autoFixAttempts ?? 0;
   const nextAttempt = previousAttempts + 1;
@@ -388,45 +311,41 @@ async function rollback(contentItemId: string, report: ReviewReport) {
   const highFindings = report.findings.filter((f) => f.severity === "high");
   const summary = highFindings.map((f) => `- [${f.area}] ${f.message}`).join("\n");
 
-  // ── Give-up path ─────────────────────────────────────────────────────
-  // After MAX_AUTO_FIX_ATTEMPTS the rule is: leave it published as-is and
-  // stop reviewing. No rollback, no human escalation. Future republishes
-  // (e.g. if a human edits and re-approves) also skip post-review thanks
-  // to meta.skipPostReview.
+  // ── Escalation path ──────────────────────────────────────────────────
+  // After MAX_AUTO_FIX_ATTEMPTS we've already burned 2 fix cycles and the
+  // page is still broken. Keep it unpublished, flag for admin review.
+  // (Old behavior was "leave published as-is"; that's only acceptable for
+  // CONTENT issues, never layout.)
   if (previousAttempts >= MAX_AUTO_FIX_ATTEMPTS) {
     await prisma.contentItem.update({
       where: { id: contentItemId },
       data: {
+        status: "review",
         reviewNotes:
-          `Auto-fix exhausted (${MAX_AUTO_FIX_ATTEMPTS}× attempts). Left published as-is — no further review.\n\nLatest findings (${report.checkedAt}):\n` + summary,
+          `Layout fix exhausted (${MAX_AUTO_FIX_ATTEMPTS}× attempts). Page is UNPUBLISHED until you approve.\n\nLatest findings (${report.checkedAt}):\n` + summary,
         meta: {
           ...(item.meta as object),
-          autoFixGivenUp: true,
-          skipPostReview: true,
+          layoutFixExhausted: true,
           lastFindings: highFindings as unknown as Prisma.InputJsonValue,
         } as Prisma.InputJsonValue,
       },
     });
     logger.warn(
       { contentItemId, previousAttempts, type: item.type },
-      "post_review.given_up_left_published",
+      "post_review.layout_escalated_to_admin",
     );
     return;
   }
 
   // ── Auto-fix path (attempts 1 and 2) ─────────────────────────────────
   // Only blogs auto-fix today; other types fall through to human review.
-  const canAutoFix = item.type === "blog";
-
-  if (!canAutoFix) {
-    // Non-blog: roll back the published row + escalate to human review.
-    await deleteMaterialized(item);
+  if (item.type !== "blog") {
     await prisma.contentItem.update({
       where: { id: contentItemId },
       data: {
         status: "review",
         reviewNotes:
-          `Auto-rolled back by post-publish reviewer (${report.checkedAt}, attempt ${report.attempt}):\n` + summary,
+          `Auto-rolled back by layout reviewer (${report.checkedAt}, attempt ${report.attempt}):\n` + summary,
         meta: {
           ...(item.meta as object),
           lastFindings: highFindings as unknown as Prisma.InputJsonValue,
@@ -440,19 +359,12 @@ async function rollback(contentItemId: string, report: ReviewReport) {
   // Blog auto-fix: classify findings to drive cheapest possible regen.
   const fixScope = deriveFixScope(highFindings);
 
-  // For text-only fixes, leave the published page UP while we regenerate —
-  // a broken image marker (rare) is worse to leave up than a missing brand
-  // mention, so only roll back the live row for image-scope or both-scope.
-  if (fixScope === "images" || fixScope === "both") {
-    await deleteMaterialized(item);
-  }
-
   await prisma.contentItem.update({
     where: { id: contentItemId },
     data: {
       status: "queued",
       reviewNotes:
-        `Auto-fix ${nextAttempt}/${MAX_AUTO_FIX_ATTEMPTS} (scope: ${fixScope}) — ${report.checkedAt}\n` + summary,
+        `Layout fix ${nextAttempt}/${MAX_AUTO_FIX_ATTEMPTS} (scope: ${fixScope}) — ${report.checkedAt}\n` + summary,
       meta: {
         ...(item.meta as object),
         autoFixAttempts: nextAttempt,
@@ -494,4 +406,3 @@ async function deleteMaterialized(item: {
   }
 }
 
-void Prompts; // keep the import live; reserved for future prompt sharing

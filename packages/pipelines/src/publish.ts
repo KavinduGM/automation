@@ -47,19 +47,17 @@ export async function publishContentItem(contentItemId: string): Promise<void> {
       }).catch((err) => logger.warn({ err, contentItemId }, "publish.revalidate_failed"));
     }
 
-    // Schedule a post-publish live-page review ~3 minutes out so any stale
+    // Schedule a post-publish LAYOUT review ~3 minutes out so any stale
     // 404 ISR cache from a previous failed publish has time to expire
     // (Next.js `revalidate: 60` on /blog/[slug] tops out at 60s, plus
     // ~90s of safety margin for slow regeneration on a busy worker box).
     // Only for content types with a real public URL.
     //
-    // Skip when meta.skipPostReview is set — happens after the post-review
-    // gave up (2 auto-fix attempts), so subsequent re-publishes (e.g. a
-    // human edited the body and re-approved) don't re-trigger the loop.
-    const meta = (item.meta ?? {}) as { skipPostReview?: boolean };
+    // Always runs — layout issues are unacceptable to leave live, and the
+    // reviewer no longer touches content (that's the pre-publish critic).
     const business = await prisma.business.findUnique({ where: { id: item.businessId } });
     const publicUrl = business ? publicUrlFor({ type: item.type, slug: item.slug, businessId: item.businessId }, business.slug) : null;
-    if (publicUrl && !meta.skipPostReview) {
+    if (publicUrl) {
       try {
         await queue(QUEUES.post_review).add(
           `review:${contentItemId}`,
@@ -70,8 +68,6 @@ export async function publishContentItem(contentItemId: string): Promise<void> {
       } catch (err) {
         logger.warn({ err, contentItemId }, "publish.post_review_enqueue_failed");
       }
-    } else if (publicUrl && meta.skipPostReview) {
-      logger.info({ contentItemId, publicUrl }, "publish.post_review_skipped_marked");
     }
   } catch (err) {
     logger.error({ err, contentItemId }, "publish.failed");

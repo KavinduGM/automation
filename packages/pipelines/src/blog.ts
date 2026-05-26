@@ -50,17 +50,26 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
   //   - "text"   → regen outline + draft, KEEP existing images (cheap text fix)
   //   - "images" → skip outline + draft, only regen images (saves Claude $)
   //   - "both"   → full pipeline
+  //
+  // Two counters can put us in a fix retry:
+  //   - contentFixAttempts → AI critic flagged content issues pre-publish
+  //   - autoFixAttempts    → post-publish layout reviewer rolled back
   const itemMeta = (item.meta ?? {}) as {
     autoFixAttempts?: number;
+    contentFixAttempts?: number;
     lastFindings?: Array<{ area: string; message: string }>;
     fixScope?: "text" | "images" | "both";
     outline?: BlogOutline;
   };
-  const autoFixAttempt = itemMeta.autoFixAttempts ?? 0;
+  const layoutAttempt = itemMeta.autoFixAttempts ?? 0;
+  const contentAttempt = itemMeta.contentFixAttempts ?? 0;
+  const totalFixAttempt = layoutAttempt + contentAttempt;
   const fixScope: "text" | "images" | "both" =
-    autoFixAttempt > 0 ? (itemMeta.fixScope ?? "both") : "both";
+    totalFixAttempt > 0 ? (itemMeta.fixScope ?? "both") : "both";
 
   // Image-only fast path: reuse existing outline + body, just regen images.
+  // Only the layout-fix loop can ask for images-scope (the critic doesn't
+  // read images), so this branch is safe to keep gated on fixScope alone.
   if (fixScope === "images") {
     await regenImagesOnly(contentItemId, business, itemMeta.outline);
     await setStatus(contentItemId, "self_critique");
@@ -164,8 +173,8 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
   // Auto-fix mode: if this is a retry after a post-publish rollback, the
   // previous high-severity findings are stored on the item. We feed them
   // to Claude so it knows what to correct.
-  const correctionContext = autoFixAttempt > 0 && itemMeta.lastFindings?.length
-    ? buildCorrectionContext(autoFixAttempt, itemMeta.lastFindings)
+  const correctionContext = totalFixAttempt > 0 && itemMeta.lastFindings?.length
+    ? buildCorrectionContext(totalFixAttempt, itemMeta.lastFindings)
     : "";
 
   const draftRes = await claude<string>({
@@ -189,7 +198,10 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
   //    so the publish layer can map [[IMAGE_N]] markers → real URLs.
   //    Skipped on text-only auto-fixes; existing assets carry over.
   if (fixScope === "text") {
-    logger.info({ contentItemId, autoFixAttempt }, "blog.skipping_images_text_only_fix");
+    logger.info(
+      { contentItemId, layoutAttempt, contentAttempt },
+      "blog.skipping_images_text_only_fix",
+    );
   } else {
     await runImageGeneration(contentItemId, business.id, business.slug, slug, outline.imagePrompts ?? []);
   }

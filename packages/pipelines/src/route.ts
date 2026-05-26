@@ -1,10 +1,15 @@
-import { prisma, Prompts, logger } from "@ca/shared";
+import { prisma, Prompts, logger, type Prisma } from "@ca/shared";
 import { claude } from "@ca/providers";
 import { bumpCost, loadBrandContext, setStatus } from "./util.js";
 import { queue, QUEUES } from "@ca/shared";
 
 // Decides what happens after a piece is drafted: auto-publish, AI-review,
 // or send to the human review queue. Reads ContentPlan.approvalMode.
+//
+// AI-review mode runs an auto-fix loop pre-publish: if the critic flags
+// issues, we re-draft and re-check up to MAX_CONTENT_FIX_ATTEMPTS times.
+// After that, the item publishes anyway (content issues are tolerable;
+// layout issues caught post-publish are NOT — see post-review.ts).
 
 interface CriticVerdict {
   scores: Record<string, number>;
@@ -12,23 +17,25 @@ interface CriticVerdict {
   verdict: "approve" | "revise" | "escalate";
 }
 
+const MAX_CONTENT_FIX_ATTEMPTS = 2;
+
 export async function routeApproval(contentItemId: string): Promise<void> {
   const item = await prisma.contentItem.findUniqueOrThrow({ where: { id: contentItemId } });
   const plan = await prisma.contentPlan.findUnique({
     where: { businessId_contentType: { businessId: item.businessId, contentType: item.type } },
   });
 
-  // Auto-fix retries bypass the configured approval mode and re-publish
-  // directly. The human (or AI critic) already approved the item the first
-  // time around; the auto-fix loop just corrects what the post-publish
-  // reviewer flagged, so funneling it back through human/ai review would
-  // stall the loop indefinitely.
-  const itemMeta = (item.meta ?? {}) as { autoFixAttempts?: number };
-  const isAutoFix = (itemMeta.autoFixAttempts ?? 0) > 0;
-  const mode = isAutoFix ? "auto" : (plan?.approvalMode ?? "human_review");
+  // Layout-fix retries (post-publish reviewer rolled back) bypass the
+  // configured approval mode and republish directly — the critic already
+  // ran on the original version, and the fix is about RENDERING, not text.
+  // Content-fix retries (pre-publish critic round-tripping) do NOT bypass;
+  // we want the critic to re-evaluate the fixed draft.
+  const itemMeta = (item.meta ?? {}) as { autoFixAttempts?: number; contentFixAttempts?: number };
+  const isLayoutFix = (itemMeta.autoFixAttempts ?? 0) > 0;
+  const mode = isLayoutFix ? "auto" : (plan?.approvalMode ?? "human_review");
 
-  if (isAutoFix) {
-    logger.info({ contentItemId, attempt: itemMeta.autoFixAttempts }, "route.auto_fix_bypassing_approval");
+  if (isLayoutFix) {
+    logger.info({ contentItemId, attempt: itemMeta.autoFixAttempts }, "route.layout_fix_bypassing_approval");
   }
 
   if (mode === "auto") {
@@ -38,37 +45,121 @@ export async function routeApproval(contentItemId: string): Promise<void> {
   }
 
   if (mode === "ai_review") {
-    const { brandBlock } = await loadBrandContext(item.businessId);
-    const res = await claude<CriticVerdict>({
-      model: "routing",
-      json: true,
-      maxTokens: 1024,
-      system: Prompts.CRITIC_SYSTEM,
-      user: Prompts.criticUser(brandBlock, item.type, item.bodyMd),
-    });
-    await bumpCost(contentItemId, res.costUsd);
-    const verdict = res.json;
-    if (!verdict) {
-      logger.warn({ contentItemId }, "route.critic_missing_json → human_review");
-      await setStatus(contentItemId, "review", { reviewNotes: "AI critic returned no JSON" });
-      return;
-    }
-    await prisma.contentItem.update({
-      where: { id: contentItemId },
-      data: {
-        meta: { ...(item.meta as object), critic: verdict as unknown as object },
-        reviewNotes: verdict.issues.map((i) => `[${i.severity}] ${i.where}: ${i.what}`).join("\n"),
-      },
-    });
-    if (verdict.verdict === "approve") {
-      await setStatus(contentItemId, "approved");
-      await queue(QUEUES.publish).add("publish", { contentItemId });
-    } else {
-      await setStatus(contentItemId, "review");
-    }
+    await runAiReview(contentItemId, item, itemMeta.contentFixAttempts ?? 0);
     return;
   }
 
   // human_review
   await setStatus(contentItemId, "review");
+}
+
+async function runAiReview(
+  contentItemId: string,
+  item: Awaited<ReturnType<typeof prisma.contentItem.findUniqueOrThrow>>,
+  contentFixAttempts: number,
+): Promise<void> {
+  const { brandBlock } = await loadBrandContext(item.businessId);
+  const res = await claude<CriticVerdict>({
+    model: "routing",
+    json: true,
+    maxTokens: 1024,
+    system: Prompts.CRITIC_SYSTEM,
+    user: Prompts.criticUser(brandBlock, item.type, item.bodyMd),
+  });
+  await bumpCost(contentItemId, res.costUsd);
+  const verdict = res.json;
+
+  if (!verdict) {
+    logger.warn({ contentItemId }, "route.critic_missing_json → publishing without further review");
+    await prisma.contentItem.update({
+      where: { id: contentItemId },
+      data: {
+        reviewNotes: "AI critic returned no JSON — published without verdict.",
+        meta: {
+          ...(item.meta as object),
+          critic: { error: "no_json" } as unknown as Prisma.InputJsonValue,
+        } as Prisma.InputJsonValue,
+      },
+    });
+    await setStatus(contentItemId, "approved");
+    await queue(QUEUES.publish).add("publish", { contentItemId });
+    return;
+  }
+
+  const issuesSummary = verdict.issues.map((i) => `[${i.severity}] ${i.where}: ${i.what}`).join("\n");
+
+  await prisma.contentItem.update({
+    where: { id: contentItemId },
+    data: {
+      meta: {
+        ...(item.meta as object),
+        critic: verdict as unknown as Prisma.InputJsonValue,
+      } as Prisma.InputJsonValue,
+      reviewNotes: issuesSummary,
+    },
+  });
+
+  // Critic approved → publish.
+  if (verdict.verdict === "approve") {
+    await setStatus(contentItemId, "approved");
+    await queue(QUEUES.publish).add("publish", { contentItemId });
+    return;
+  }
+
+  // Critic flagged issues. Re-draft up to MAX_CONTENT_FIX_ATTEMPTS times,
+  // then publish anyway — we don't escalate to humans for content issues.
+  const nextAttempt = contentFixAttempts + 1;
+
+  if (contentFixAttempts >= MAX_CONTENT_FIX_ATTEMPTS) {
+    logger.warn(
+      { contentItemId, contentFixAttempts, verdict: verdict.verdict },
+      "route.content_fix_exhausted_publishing_anyway",
+    );
+    await prisma.contentItem.update({
+      where: { id: contentItemId },
+      data: {
+        meta: {
+          ...(item.meta as object),
+          critic: verdict as unknown as Prisma.InputJsonValue,
+          contentFixGivenUp: true,
+        } as Prisma.InputJsonValue,
+        reviewNotes:
+          `Content fix exhausted (${MAX_CONTENT_FIX_ATTEMPTS}× attempts). Published as-is.\n\nLast critic issues:\n` +
+          issuesSummary,
+      },
+    });
+    await setStatus(contentItemId, "approved");
+    await queue(QUEUES.publish).add("publish", { contentItemId });
+    return;
+  }
+
+  // Re-draft. Reuse the blog pipeline's correction-context mechanism via
+  // meta.lastFindings; classify everything here as a text issue (the
+  // critic doesn't read images).
+  const lastFindings = verdict.issues
+    .filter((i) => i.severity === "high" || i.severity === "med")
+    .map((i) => ({ area: "content", message: `${i.where}: ${i.what}`, severity: i.severity }));
+
+  await prisma.contentItem.update({
+    where: { id: contentItemId },
+    data: {
+      meta: {
+        ...(item.meta as object),
+        critic: verdict as unknown as Prisma.InputJsonValue,
+        contentFixAttempts: nextAttempt,
+        fixScope: "text",
+        lastFindings: lastFindings as unknown as Prisma.InputJsonValue,
+      } as Prisma.InputJsonValue,
+      reviewNotes: `Content fix ${nextAttempt}/${MAX_CONTENT_FIX_ATTEMPTS} (AI critic flagged) — re-drafting…\n${issuesSummary}`,
+    },
+  });
+  await setStatus(contentItemId, "queued");
+  await queue(QUEUES.draft).add(
+    `${item.type}:${contentItemId}:content-fix:${nextAttempt}`,
+    { contentItemId, type: item.type },
+  );
+  logger.info(
+    { contentItemId, attempt: nextAttempt, verdict: verdict.verdict, issues: lastFindings.length },
+    "route.content_fix_enqueued",
+  );
 }

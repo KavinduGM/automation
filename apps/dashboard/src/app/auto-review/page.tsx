@@ -3,20 +3,26 @@ import { prisma } from "@ca/shared";
 import { requireUser } from "@/lib/auth";
 import { Nav } from "@/components/Nav";
 
-// Auto-review hub. Four buckets ordered by urgency:
-//   1. Auto-fixing       — reviewer rolled back, currently regenerating text or images
-//   2. In-flight         — just published, reviewer hasn't fired yet (within 3-min delay)
-//   3. Published as-is   — gave up after 2 attempts; still live, no further review
-//   4. Recently OK       — last reviewed clean
+// Auto-review hub. Five buckets ordered by attention required:
 //
-// Each row shows a friendly status line ("Doing text changes · try 2/2"),
-// the publish time (or last-checked time), and the top findings.
+//   1. Unpublished — needs admin    (status=review, meta.layoutFixExhausted)
+//   2. Layout fixing                 (status=queued/etc, autoFixAttempts > 0)
+//   3. Content fixing                (status=queued/etc, contentFixAttempts > 0)
+//   4. In-flight                     (status=published, no postReview yet)
+//   5. Published (recent)            (status=published with postReview)
+//
+// "Content" and "layout" are separate concerns:
+//   - Content checks run pre-publish (AI critic, route.ts). 2 fix attempts,
+//     then publish anyway. No human escalation for content.
+//   - Layout checks run post-publish (post-review.ts). 2 fix attempts,
+//     then UNPUBLISH and notify admin — layout damage is never left live.
 
 export const dynamic = "force-dynamic";
 
 type Item = Awaited<ReturnType<typeof prisma.contentItem.findMany>>[number];
 type Meta = {
-  autoFixAttempts?: number;
+  autoFixAttempts?: number;       // layout-fix counter (legacy name)
+  contentFixAttempts?: number;    // pre-publish content-fix counter
   fixScope?: "text" | "images" | "both";
   postReview?: {
     overall?: "ok" | "warnings" | "critical";
@@ -24,12 +30,12 @@ type Meta = {
     findings?: Array<{ area: string; message: string; severity: string }>;
   };
   lastFindings?: Array<{ area: string; message: string; severity?: string }>;
-  autoFixGivenUp?: boolean;
-  autoFixExhausted?: boolean;
+  layoutFixExhausted?: boolean;
+  contentFixGivenUp?: boolean;
   imageErrors?: Array<{ ord: number; message: string }>;
 };
 
-const AUTO_FIX_BUSY_STATUSES = ["queued", "researching", "drafting", "generating_media", "self_critique"] as const;
+const BUSY_STATUSES = ["queued", "researching", "drafting", "generating_media", "self_critique"] as const;
 const MAX_ATTEMPTS = 2;
 
 export default async function AutoReviewPage() {
@@ -42,9 +48,15 @@ export default async function AutoReviewPage() {
         {
           AND: [
             { status: { in: ["queued", "researching", "drafting", "generating_media", "self_critique"] } },
-            { meta: { path: ["autoFixAttempts"], gt: 0 } as never },
+            {
+              OR: [
+                { meta: { path: ["autoFixAttempts"], gt: 0 } as never },
+                { meta: { path: ["contentFixAttempts"], gt: 0 } as never },
+              ],
+            },
           ],
         },
+        { AND: [{ status: "review" }, { meta: { path: ["layoutFixExhausted"], equals: true } as never }] },
       ],
     },
     include: { business: true },
@@ -52,25 +64,25 @@ export default async function AutoReviewPage() {
     take: 250,
   });
 
-  const autoFixing: Item[] = [];
+  const unpublishedNeedsAdmin: Item[] = [];
+  const layoutFixing: Item[] = [];
+  const contentFixing: Item[] = [];
   const inFlight: Item[] = [];
-  const publishedAsIs: Item[] = [];
-  const reviewedOk: Item[] = [];
+  const publishedOk: Item[] = [];
 
   for (const it of recent) {
     const meta = (it.meta ?? {}) as Meta;
-    const busy = (AUTO_FIX_BUSY_STATUSES as readonly string[]).includes(it.status);
-    if (busy && (meta.autoFixAttempts ?? 0) > 0) {
-      autoFixing.push(it);
-    } else if (it.status === "published" && meta.autoFixGivenUp) {
-      publishedAsIs.push(it);
+    const busy = (BUSY_STATUSES as readonly string[]).includes(it.status);
+    if (it.status === "review" && meta.layoutFixExhausted) {
+      unpublishedNeedsAdmin.push(it);
+    } else if (busy && (meta.autoFixAttempts ?? 0) > 0) {
+      layoutFixing.push(it);
+    } else if (busy && (meta.contentFixAttempts ?? 0) > 0) {
+      contentFixing.push(it);
     } else if (it.status === "published" && !meta.postReview) {
       inFlight.push(it);
-    } else if (it.status === "published" && meta.postReview?.overall === "ok") {
-      reviewedOk.push(it);
-    } else if (it.status === "published" && meta.postReview?.overall === "warnings") {
-      // Warnings stay published but worth surfacing; treat as reviewed bucket
-      reviewedOk.push(it);
+    } else if (it.status === "published" && meta.postReview) {
+      publishedOk.push(it);
     }
   }
 
@@ -81,39 +93,48 @@ export default async function AutoReviewPage() {
         <div className="flex items-baseline justify-between mb-6">
           <h1 className="text-xl font-semibold">Auto-review</h1>
           <div className="text-xs text-gray-500">
-            Live-page checks fire ~3 min after publish · up to {MAX_ATTEMPTS} auto-fix retries · gives up after that
+            Content checked pre-publish · Layout checked post-publish · {MAX_ATTEMPTS} auto-fix tries each
           </div>
         </div>
 
         <Bucket
-          title="Auto-fixing"
-          subtitle="Reviewer found issues — system is regenerating"
-          items={autoFixing}
-          empty="No auto-fix attempts in progress."
+          title="Needs admin — unpublished"
+          subtitle={`Layout fix exhausted after ${MAX_ATTEMPTS} attempts. Page is OFF. Open to review and re-approve.`}
+          items={unpublishedNeedsAdmin}
+          empty="Nothing waiting on admin."
+          tone="critical"
+          showFindings
+        />
+
+        <Bucket
+          title="Layout fixing"
+          subtitle="Layout reviewer rolled the page back — system is regenerating"
+          items={layoutFixing}
+          empty="No layout fixes in progress."
+          tone="warning"
+          showFindings
+        />
+
+        <Bucket
+          title="Content fixing"
+          subtitle="AI critic flagged content issues pre-publish — re-drafting"
+          items={contentFixing}
+          empty="No content fixes in progress."
           tone="warning"
         />
 
         <Bucket
           title="In-flight"
-          subtitle="Just published — reviewer fires in ~3 min"
+          subtitle="Just published — layout reviewer fires in ~3 min"
           items={inFlight}
           empty="Nothing in flight."
           tone="info"
         />
 
         <Bucket
-          title="Published as-is"
-          subtitle={`Gave up after ${MAX_ATTEMPTS} attempts — kept live, no further review`}
-          items={publishedAsIs}
-          empty="Nothing here."
-          tone="muted"
-          showFindings
-        />
-
-        <Bucket
-          title="Published correctly"
-          subtitle="Last review came back clean (or warnings only)"
-          items={reviewedOk.slice(0, 30)}
+          title="Recently published"
+          subtitle="Last layout review result"
+          items={publishedOk.slice(0, 30)}
           empty="No reviewed items yet."
           tone="success"
         />
@@ -124,29 +145,30 @@ export default async function AutoReviewPage() {
 
 function statusLine(it: Item): { label: string; tone: "info" | "warning" | "success" | "muted" | "critical" } {
   const meta = (it.meta ?? {}) as Meta;
-  const attempts = meta.autoFixAttempts ?? 0;
+  const layoutN = meta.autoFixAttempts ?? 0;
+  const contentN = meta.contentFixAttempts ?? 0;
   const scope = meta.fixScope ?? "both";
-  const busy = (AUTO_FIX_BUSY_STATUSES as readonly string[]).includes(it.status);
+  const busy = (BUSY_STATUSES as readonly string[]).includes(it.status);
 
-  if (busy && attempts > 0) {
-    let action = "Auto-fixing";
-    if (scope === "text") {
-      action = it.status === "generating_media" ? "Refreshing media" : "Doing text changes";
-    } else if (scope === "images") {
-      action = "Creating images";
-    } else {
-      action = it.status === "generating_media" ? "Creating images" : "Doing text changes";
-    }
-    return { label: `${action} · try ${attempts}/${MAX_ATTEMPTS}`, tone: "warning" };
+  if (it.status === "review" && meta.layoutFixExhausted) {
+    return { label: `Unpublished · layout ${MAX_ATTEMPTS}/${MAX_ATTEMPTS} tries used`, tone: "critical" };
   }
-  if (it.status === "published" && meta.autoFixGivenUp) {
-    return { label: `Published as-is · ${MAX_ATTEMPTS}/${MAX_ATTEMPTS} tries used`, tone: "muted" };
+  if (busy && layoutN > 0) {
+    let action = "Auto-fixing layout";
+    if (scope === "text") action = it.status === "generating_media" ? "Refreshing media" : "Patching text for layout";
+    else if (scope === "images") action = "Creating images";
+    else action = it.status === "generating_media" ? "Creating images" : "Patching layout";
+    return { label: `${action} · try ${layoutN}/${MAX_ATTEMPTS}`, tone: "warning" };
+  }
+  if (busy && contentN > 0) {
+    return { label: `Redrafting (content critic) · try ${contentN}/${MAX_ATTEMPTS}`, tone: "warning" };
   }
   if (it.status === "published" && !meta.postReview) {
-    return { label: "Awaiting review", tone: "info" };
+    return { label: "Awaiting layout review", tone: "info" };
   }
   if (it.status === "published" && meta.postReview?.overall === "ok") {
-    return { label: "Published correctly", tone: "success" };
+    if (meta.contentFixGivenUp) return { label: "Published · content fix exhausted", tone: "muted" };
+    return { label: "Published — layout OK", tone: "success" };
   }
   if (it.status === "published" && meta.postReview?.overall === "warnings") {
     return { label: "Published with warnings", tone: "info" };
@@ -224,7 +246,7 @@ function Bucket({
                     {checkedAt && <> · checked {checkedAt}</>}
                     {!publishedAt && <> · updated {fmtTime(it.updatedAt)}</>}
                   </div>
-                  {(showFindings || status.tone === "warning") && findings.length > 0 && (
+                  {showFindings && findings.length > 0 && (
                     <ul className="mt-2 text-xs text-gray-700 space-y-0.5">
                       {findings.slice(0, 3).map((f, idx) => (
                         <li key={idx} className="truncate">
