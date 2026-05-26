@@ -35,16 +35,19 @@ export async function publishContentItem(contentItemId: string): Promise<void> {
       data: { status: "published", publishedAt: new Date() },
     });
 
-    // Schedule a post-publish live-page review ~90s out so ISR has time to
-    // regenerate. Only for content types with a real public URL.
+    // Schedule a post-publish live-page review ~3 minutes out so any stale
+    // 404 ISR cache from a previous failed publish has time to expire
+    // (Next.js `revalidate: 60` on /blog/[slug] tops out at 60s, plus
+    // ~90s of safety margin for slow regeneration on a busy worker box).
+    // Only for content types with a real public URL.
     const business = await prisma.business.findUnique({ where: { id: item.businessId } });
     const publicUrl = business ? publicUrlFor({ type: item.type, slug: item.slug, businessId: item.businessId }, business.slug) : null;
     if (publicUrl) {
       try {
         await queue(QUEUES.post_review).add(
           `review:${contentItemId}`,
-          { contentItemId, publicUrl },
-          { delay: 90_000, removeOnComplete: 500, removeOnFail: 100 },
+          { contentItemId, publicUrl, attempt: 0 },
+          { delay: 180_000, removeOnComplete: 500, removeOnFail: 100 },
         );
         logger.info({ contentItemId, publicUrl }, "publish.post_review_enqueued");
       } catch (err) {

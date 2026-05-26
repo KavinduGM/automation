@@ -111,10 +111,14 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
     },
   });
 
-  // 3. Full draft with image markers + CTA markers + FAQ section
+  // 3. Full draft with image markers + CTA markers + FAQ section.
+  //    A 1500-2200-word post + 5-FAQ + image/CTA markers averages 10-12k
+  //    output tokens; 8k was clipping ~one-in-three. 14k buys headroom for
+  //    long titles + long FAQ answers without runaway cost (each extra 1k
+  //    output tokens at sonnet pricing is ~$0.015).
   const draftRes = await claude<string>({
     model: "writing",
-    maxTokens: 8000,
+    maxTokens: 14000,
     system: Prompts.BLOG_DRAFT_SYSTEM,
     user: Prompts.blogDraftUser(outline, brandBlock, servicesBlock),
   });
