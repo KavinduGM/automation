@@ -105,12 +105,20 @@ Other rules:
 - The brand name MUST be mentioned by name in metaDescription OR excerpt at least once.
 - FAQ questions mirror real "people also ask" phrasing (start with How/What/Why/When/Should).`;
 
-export function blogOutlineUser(topic: string, brand: string, services: string): string {
+export function blogOutlineUser(
+  topic: string,
+  brand: string,
+  services: string,
+  researchContext?: string,
+): string {
+  const research = researchContext && researchContext.trim().length > 0
+    ? `\n\n# LIVE RESEARCH (use these specific angles and examples — do NOT write generic background)\n${researchContext}\n`
+    : "";
   return `${brand}
 
 ${services}
 
-Topic to plan: ${topic}
+Topic to plan: ${topic}${research}
 
 Plan a 1500-2200 word SEO-optimized blog post for this brand that naturally promotes the most relevant service from the catalog above. Return JSON only.`;
 }

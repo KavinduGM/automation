@@ -172,6 +172,7 @@ enum TopicSourceKind {
   grok_x
   claude_seed
   rss
+  daily_brief // Claude proposes N brand-aligned topics → one batched Grok call enriches them
 }
 
 model TopicCandidate {
@@ -183,6 +184,12 @@ model TopicCandidate {
   url         String?
   raw         Json     @default("{}")
   score       Float    @default(0)
+  // Claude tags during proposal: evergreen | time_sensitive | breaking.
+  // Null for legacy/non-daily_brief topics. Drives the per-article research
+  // opt-in: admin can enable freshResearch for sensitive topics that need
+  // an up-to-the-minute Grok call at draft time instead of the morning batch.
+  sensitivity String?
+  freshResearchEnabled Boolean @default(false)
   // sha256 of normalized title — guards against re-using the same idea.
   dedupeHash  String
   usedAt      DateTime?

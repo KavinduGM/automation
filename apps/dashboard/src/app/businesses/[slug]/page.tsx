@@ -21,6 +21,9 @@ const OK_MESSAGES: Record<string, string> = {
   topicToggled: "Topic source status updated.",
   integration: "Integration saved.",
   integrationDeleted: "Integration deleted.",
+  freshOn: "Fresh research enabled — Grok will run per article for this topic.",
+  freshOff: "Fresh research disabled.",
+  topicCandidateDeleted: "Topic deleted.",
 };
 
 export default async function BusinessDetail({
@@ -36,6 +39,18 @@ export default async function BusinessDetail({
     include: { brandKit: true, contentPlans: true, topicSources: true, integrations: true },
   });
   if (!biz) notFound();
+
+  // Pull time-sensitive / breaking topic candidates so the admin can
+  // explicitly opt them into per-article Grok research.
+  const flaggedTopics = await prisma.topicCandidate.findMany({
+    where: {
+      businessId: biz.id,
+      usedAt: null,
+      sensitivity: { in: ["time_sensitive", "breaking"] },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 30,
+  });
 
   const okMsg = searchParams?.ok ? OK_MESSAGES[searchParams.ok] : null;
   const editPlanId = searchParams?.editPlan ?? null;
@@ -141,6 +156,22 @@ export default async function BusinessDetail({
     const src = await prisma.topicSource.findUniqueOrThrow({ where: { id } });
     await prisma.topicSource.update({ where: { id }, data: { active: !src.active } });
     redirect(`/businesses/${params.slug}?ok=topicToggled`);
+  }
+
+  async function toggleFreshResearch(formData: FormData) {
+    "use server";
+    const id = String(formData.get("id"));
+    const current = await prisma.topicCandidate.findUniqueOrThrow({ where: { id } });
+    const next = !current.freshResearchEnabled;
+    await prisma.topicCandidate.update({ where: { id }, data: { freshResearchEnabled: next } });
+    redirect(`/businesses/${params.slug}?ok=${next ? "freshOn" : "freshOff"}`);
+  }
+
+  async function deleteTopicCandidate(formData: FormData) {
+    "use server";
+    const id = String(formData.get("id"));
+    await prisma.topicCandidate.delete({ where: { id } });
+    redirect(`/businesses/${params.slug}?ok=topicCandidateDeleted`);
   }
 
   async function saveIntegration(formData: FormData) {
@@ -310,7 +341,15 @@ export default async function BusinessDetail({
                 <pre className="text-[10px] mt-1 whitespace-pre-wrap">{JSON.stringify(s.config, null, 2)}</pre>
               </div>
             ))}
-            {biz.topicSources.length === 0 && <div className="text-gray-500">None — add one. Reddit example config: {`{ "subreddits": ["SaaS","marketing"], "time": "day" }`}</div>}
+            {biz.topicSources.length === 0 && (
+              <div className="text-gray-500 space-y-1">
+                <div>None yet — add one. Example configs:</div>
+                <div><code>daily_brief</code> (recommended): {`{ "industry": "B2B SaaS web dev", "audience": "tech founders" }`}</div>
+                <div><code>reddit</code>: {`{ "subreddits": ["SaaS","marketing"], "time": "day" }`}</div>
+                <div><code>grok_x</code>: {`{ "query": "trending B2B SaaS topics on X in the last 24h" }`}</div>
+                <div><code>claude_seed</code>: {`{ "brief": "evergreen topics this brand should cover" }`}</div>
+              </div>
+            )}
           </div>
           <div className="border-t pt-3">
             <div className="text-xs font-medium text-gray-600 mb-2">
@@ -321,6 +360,7 @@ export default async function BusinessDetail({
               <div>
                 <label className="label">Kind</label>
                 <select className="input" name="kind" defaultValue={editingTopic?.kind}>
+                  <option value="daily_brief">daily_brief (Claude→Grok chain, recommended)</option>
                   <option value="reddit">reddit</option>
                   <option value="grok_x">grok_x</option>
                   <option value="claude_seed">claude_seed</option>
@@ -347,6 +387,68 @@ export default async function BusinessDetail({
               )}
             </form>
           </div>
+        </section>
+
+        {/* ── Topics flagged for fresh research ────────────────────── */}
+        <section className="card">
+          <h2 className="font-medium mb-1">Topics flagged for fresh research</h2>
+          <p className="text-xs text-gray-500 mb-3">
+            <code>daily_brief</code> tags each topic by sensitivity. Time-sensitive and breaking topics may go stale between the 04:00 UTC research window and the time the blog actually drafts. Enable per-article research below to make Grok re-check just before drafting.
+          </p>
+          {flaggedTopics.length === 0 ? (
+            <div className="text-xs text-gray-500">
+              No flagged topics yet. Add a <code>daily_brief</code> Topic source and wait for the next research run (04:00 UTC daily).
+            </div>
+          ) : (
+            <div className="grid gap-2 text-xs">
+              {flaggedTopics.map((t) => {
+                const sevBg = t.sensitivity === "breaking"
+                  ? "bg-red-100 text-red-800"
+                  : "bg-orange-100 text-orange-800";
+                const raw = (t.raw ?? {}) as { whyNow?: string | null; enriched?: boolean };
+                return (
+                  <div key={t.id} className="rounded bg-gray-50 px-2 py-1.5">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-medium truncate">{t.title}</span>
+                          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${sevBg}`}>
+                            {t.sensitivity}
+                          </span>
+                          {raw.enriched && (
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-200 text-gray-700">
+                              has morning brief
+                            </span>
+                          )}
+                          {t.freshResearchEnabled && (
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-800">
+                              fresh research ON
+                            </span>
+                          )}
+                        </div>
+                        {raw.whyNow && (
+                          <div className="text-gray-500 mt-0.5 italic">{raw.whyNow}</div>
+                        )}
+                        <div className="text-gray-400 mt-0.5">score {t.score.toFixed(0)} · added {t.createdAt.toISOString().slice(0, 10)}</div>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <form action={toggleFreshResearch}>
+                          <input type="hidden" name="id" value={t.id} />
+                          <button className="btn-ghost px-2 py-1 text-xs">
+                            {t.freshResearchEnabled ? "Disable fresh" : "Enable fresh"}
+                          </button>
+                        </form>
+                        <form action={deleteTopicCandidate}>
+                          <input type="hidden" name="id" value={t.id} />
+                          <button className="btn-danger px-2 py-1 text-xs">Delete</button>
+                        </form>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </section>
 
         {/* ── Integrations ──────────────────────────────────────────── */}

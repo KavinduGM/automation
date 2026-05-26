@@ -1,5 +1,5 @@
 import { prisma, Prompts, logger, brandServicesBlock, brandSiteFor, type Prisma } from "@ca/shared";
-import { claude, generateImage } from "@ca/providers";
+import { claude, generateImage, grokBatchedBriefs } from "@ca/providers";
 import { bumpCost, loadBrandContext, makeSlug, markTopicUsed, setStatus, unusedTopicFor } from "./util.js";
 import { routeApproval } from "./route.js";
 import type { SeoBundle } from "./seo.js";
@@ -80,16 +80,26 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
   // 1. Get a topic
   await setStatus(contentItemId, "researching");
   let topicTitle = item.title;
+  let topicCandidateId = item.topicCandidateId;
   if (!topicTitle) {
     const t = await unusedTopicFor(item.businessId);
     if (!t) throw new Error("No unused topic candidate available — wait for next research cycle");
     topicTitle = t.title;
+    topicCandidateId = t.id;
     await markTopicUsed(t.id);
     await prisma.contentItem.update({
       where: { id: contentItemId },
       data: { title: topicTitle, topicCandidateId: t.id },
     });
   }
+
+  // Pull the original topic candidate so we can use any research brief
+  // attached to it (daily_brief topics carry grokBrief on raw, and may
+  // have freshResearchEnabled set by an admin if they're time-sensitive).
+  const topicCandidate = topicCandidateId
+    ? await prisma.topicCandidate.findUnique({ where: { id: topicCandidateId } })
+    : null;
+  const researchContext = await buildResearchContext(topicCandidate, topicTitle);
 
   // 2. Outline (carries SEO fields, image plan, CTA hints, FAQ, service tie-in)
   await setStatus(contentItemId, "drafting");
@@ -108,7 +118,7 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
     json: true,
     maxTokens: 4096,
     system: Prompts.BLOG_OUTLINE_SYSTEM,
-    user: Prompts.blogOutlineUser(topicTitle, brandBlock, servicesBlock),
+    user: Prompts.blogOutlineUser(topicTitle, brandBlock, servicesBlock, researchContext),
   });
   if (!outlineRes.json) throw new Error("blog: outline JSON missing");
   await bumpCost(contentItemId, outlineRes.costUsd);
@@ -122,7 +132,7 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
       maxTokens: 4096,
       system: Prompts.BLOG_OUTLINE_SYSTEM,
       user:
-        Prompts.blogOutlineUser(topicTitle, brandBlock, servicesBlock) +
+        Prompts.blogOutlineUser(topicTitle, brandBlock, servicesBlock, researchContext) +
         `\n\nYour previous attempt violated the structural contract:\n` +
         issues.map((i) => `  - ${i}`).join("\n") +
         `\n\nFix exactly those counts. Return JSON only.`,
@@ -297,6 +307,70 @@ async function runImageGeneration(
       "blog.image_generation_partial",
     );
   }
+}
+
+// Build the research context block fed into the outline prompt.
+// Sources (in priority order):
+//   1. Fresh per-article Grok call — only if the admin enabled it on the
+//      topic (freshResearchEnabled). Used for breaking/time-sensitive topics
+//      where the morning daily_brief snapshot has gone stale.
+//   2. The morning daily_brief Grok snapshot stored on raw.grokBrief.
+//   3. Nothing — falls back to a vanilla outline call.
+async function buildResearchContext(
+  candidate: Awaited<ReturnType<typeof prisma.topicCandidate.findUnique>>,
+  topicTitle: string,
+): Promise<string | undefined> {
+  if (!candidate) return undefined;
+  const raw = (candidate.raw ?? {}) as {
+    grokBrief?: { angles?: string[]; examples?: string[]; sources?: string[] } | null;
+    whyNow?: string | null;
+  };
+
+  // Per-article fresh research path.
+  if (candidate.freshResearchEnabled) {
+    try {
+      const { briefs } = await grokBatchedBriefs({ topics: [topicTitle] });
+      const fresh = briefs[0];
+      if (fresh) {
+        logger.info({ topicCandidateId: candidate.id }, "blog.fresh_grok_research_used");
+        return formatBrief(fresh.angles, fresh.examples, fresh.sources, raw.whyNow, "FRESH RESEARCH (just now)");
+      }
+    } catch (err) {
+      logger.warn({ err, topicCandidateId: candidate.id }, "blog.fresh_grok_failed_falling_back");
+    }
+  }
+
+  // Morning batched brief path.
+  if (raw.grokBrief) {
+    return formatBrief(
+      raw.grokBrief.angles,
+      raw.grokBrief.examples,
+      raw.grokBrief.sources,
+      raw.whyNow,
+      "DAILY BRIEFING (this morning)",
+    );
+  }
+
+  if (raw.whyNow) {
+    return `WHY NOW: ${raw.whyNow}`;
+  }
+
+  return undefined;
+}
+
+function formatBrief(
+  angles: string[] | undefined,
+  examples: string[] | undefined,
+  sources: string[] | undefined,
+  whyNow: string | null | undefined,
+  header: string,
+): string {
+  const parts: string[] = [`Source: ${header}`];
+  if (whyNow) parts.push(`Why this matters now: ${whyNow}`);
+  if (angles && angles.length) parts.push(`Angles to cover:\n${angles.map((a) => `  - ${a}`).join("\n")}`);
+  if (examples && examples.length) parts.push(`Concrete examples to weave in:\n${examples.map((e) => `  - ${e}`).join("\n")}`);
+  if (sources && sources.length) parts.push(`Reference URLs (optional citations):\n${sources.map((s) => `  - ${s}`).join("\n")}`);
+  return parts.join("\n\n");
 }
 
 // Checks the outline JSON against the hard-locked structure contract.

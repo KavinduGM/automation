@@ -1,5 +1,5 @@
-import { prisma, logger } from "@ca/shared";
-import { topPosts, grokTrends, claude } from "@ca/providers";
+import { prisma, logger, type Prisma } from "@ca/shared";
+import { topPosts, grokTrends, grokBatchedBriefs, claude } from "@ca/providers";
 import { dedupeHash } from "./util.js";
 
 // Pulls topic candidates from configured sources for one business and writes
@@ -69,6 +69,8 @@ export async function runResearchForBusiness(businessId: string): Promise<{ inse
           });
           inserted++;
         }
+      } else if (src.kind === "daily_brief") {
+        inserted += await runDailyBrief(businessId, src);
       }
       await prisma.topicSource.update({ where: { id: src.id }, data: { lastRunAt: new Date() } });
     } catch (err) {
@@ -81,6 +83,127 @@ export async function runResearchForBusiness(businessId: string): Promise<{ inse
 
   logger.info({ businessId, inserted }, "research.done");
   return { inserted };
+}
+
+// daily_brief: Claude proposes N brand-aligned blog topics (N = today's
+// blog quota from ContentPlan, capped 1..10). Each topic comes back tagged
+// evergreen | time_sensitive | breaking. Then ONE batched Grok call enriches
+// all N with current X angles + concrete examples. Saved as TopicCandidates
+// with the Grok brief on raw.grokBrief so the blog outline step can use it.
+//
+// Config shape (optional fields):
+//   { "industry": "B2B SaaS web dev", "audience": "tech founders",
+//     "topicsPerDay": null, "extraGuidance": "avoid AI-hype topics" }
+//
+// Falls back gracefully: if Grok fails, topics are still saved without
+// enrichment (Claude can still write a decent generic article).
+async function runDailyBrief(
+  businessId: string,
+  src: { id: string; config: unknown },
+): Promise<number> {
+  const cfg = (src.config ?? {}) as {
+    industry?: string;
+    audience?: string;
+    topicsPerDay?: number | null;
+    extraGuidance?: string;
+  };
+
+  // Default N = today's blog quota; cap at 10 to keep Claude/Grok output sane.
+  const blogPlan = await prisma.contentPlan.findUnique({
+    where: { businessId_contentType: { businessId, contentType: "blog" } },
+  });
+  const planQuota = blogPlan?.active ? Math.max(1, blogPlan.perPeriod) : 3;
+  const n = Math.min(10, Math.max(1, cfg.topicsPerDay ?? planQuota));
+
+  const kit = await prisma.brandKit.findUnique({ where: { businessId } });
+
+  // Step 1 — Claude proposes N brand-aligned topics, each tagged for sensitivity.
+  const proposalSystem =
+    `Propose ${n} distinct blog topics for the brand below. For each topic, tag its sensitivity:
+- "evergreen" — content that stays relevant for months (best practices, how-tos, frameworks).
+- "time_sensitive" — depends on recent context but won't expire same-day (industry shifts, quarterly trends).
+- "breaking" — news-reactive; loses value within 48h (acquisitions, product launches, viral events).
+
+Output JSON only: { topics: [{ title: string, sensitivity: "evergreen"|"time_sensitive"|"breaking", whyNow?: string }] }`;
+  const proposalUser = JSON.stringify({
+    industry: cfg.industry ?? "general B2B",
+    audience: cfg.audience ?? "professional readers",
+    brand: kit ? { icp: kit.icp, usps: kit.usps, voice: kit.voice } : null,
+    extraGuidance: cfg.extraGuidance ?? null,
+  });
+
+  type Proposal = { topics: Array<{ title: string; sensitivity?: string; whyNow?: string }> };
+  let proposal: Proposal["topics"] = [];
+  try {
+    const res = await claude<Proposal>({
+      model: "routing",
+      json: true,
+      maxTokens: 2048,
+      system: proposalSystem,
+      user: proposalUser,
+    });
+    proposal = res.json?.topics ?? [];
+  } catch (err) {
+    logger.error({ err, businessId }, "daily_brief.claude_proposal_failed");
+    return 0;
+  }
+  if (proposal.length === 0) {
+    logger.warn({ businessId }, "daily_brief.no_topics_proposed");
+    return 0;
+  }
+
+  // Step 2 — ONE batched Grok call to enrich all proposed topics.
+  let briefsByTopic = new Map<string, { angles: string[]; examples: string[]; sources?: string[] }>();
+  try {
+    const { briefs } = await grokBatchedBriefs({
+      topics: proposal.map((p) => p.title),
+      industry: cfg.industry,
+      audience: cfg.audience,
+    });
+    briefsByTopic = new Map(briefs.map((b) => [b.topic.trim().toLowerCase(), {
+      angles: b.angles ?? [],
+      examples: b.examples ?? [],
+      sources: b.sources,
+    }]));
+  } catch (err) {
+    logger.warn({ err, businessId }, "daily_brief.grok_enrichment_failed_proceeding_without");
+  }
+
+  // Step 3 — Save each as a TopicCandidate. High score (75) so the blog
+  // pipeline picks these first over generic seed/reddit topics.
+  let inserted = 0;
+  for (const p of proposal) {
+    const hash = dedupeHash(p.title);
+    const brief = briefsByTopic.get(p.title.trim().toLowerCase());
+    const sensitivity = (p.sensitivity === "evergreen" || p.sensitivity === "time_sensitive" || p.sensitivity === "breaking")
+      ? p.sensitivity
+      : "evergreen";
+    const raw = {
+      whyNow: p.whyNow ?? null,
+      grokBrief: brief ?? null,
+      enriched: !!brief,
+    };
+    const created = await prisma.topicCandidate.upsert({
+      where: { businessId_dedupeHash: { businessId, dedupeHash: hash } },
+      create: {
+        businessId,
+        source: "daily_brief",
+        title: p.title,
+        raw: raw as unknown as Prisma.InputJsonValue,
+        score: brief ? 75 : 55, // enriched topics rank above non-enriched
+        sensitivity,
+        dedupeHash: hash,
+      },
+      update: {},
+    });
+    if (created.createdAt.getTime() > Date.now() - 60_000) inserted++;
+  }
+
+  logger.info(
+    { businessId, proposed: proposal.length, enriched: briefsByTopic.size, inserted },
+    "daily_brief.done",
+  );
+  return inserted;
 }
 
 async function scoreNewCandidates(businessId: string) {
