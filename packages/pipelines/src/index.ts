@@ -10,3 +10,4 @@ export * from "./resource.js";
 export * from "./landing-page.js";
 export * from "./webinar.js";
 export * from "./animate.js";
+export * from "./post-review.js";

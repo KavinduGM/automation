@@ -63,6 +63,42 @@ export default async function ContentDetail({ params }: { params: { id: string }
     redirect(`/content/${params.id}`);
   }
 
+  // Pull a published item back from the live site. Keeps the draft + assets
+  // around so the reviewer can re-edit and re-approve.
+  async function unpublishAction() {
+    "use server";
+    const it = await prisma.contentItem.findUniqueOrThrow({ where: { id: params.id } });
+    if (it.status !== "published") return;
+    switch (it.type) {
+      case "blog":         await prisma.post.deleteMany({ where: { contentItemId: params.id } }); break;
+      case "case_study":   await prisma.caseStudy.deleteMany({ where: { contentItemId: params.id } }); break;
+      case "resource":     await prisma.resource.deleteMany({ where: { contentItemId: params.id } }); break;
+      case "landing_page": await prisma.landingPage.deleteMany({ where: { contentItemId: params.id } }); break;
+      case "social_post":  await prisma.socialPost.deleteMany({ where: { contentItemId: params.id } }); break;
+      case "webinar":      break;
+    }
+    await prisma.contentItem.update({
+      where: { id: params.id },
+      data: { status: "review", reviewNotes: "Unpublished — return to queue for edits." },
+    });
+    await prisma.auditLog.create({
+      data: { userId: user.id, businessId: it.businessId, action: "unpublish", target: `ContentItem:${params.id}` },
+    });
+    redirect(`/content/${params.id}`);
+  }
+
+  // Hard delete. Cascades via Prisma onDelete=Cascade — Post, Asset, etc. go too.
+  async function deleteAction() {
+    "use server";
+    const it = await prisma.contentItem.findUnique({ where: { id: params.id } });
+    if (!it) return;
+    await prisma.contentItem.delete({ where: { id: params.id } });
+    await prisma.auditLog.create({
+      data: { userId: user.id, businessId: it.businessId, action: "delete", target: `ContentItem:${params.id}` },
+    });
+    redirect("/");
+  }
+
   return (
     <div className="flex">
       <Nav businessSlug={item.business.slug} />
@@ -130,7 +166,7 @@ export default async function ContentDetail({ params }: { params: { id: string }
           </div>
         )}
 
-        <div className="mt-4 flex gap-2">
+        <div className="mt-4 flex flex-wrap gap-2 items-center">
           {item.status === "review" && (
             <>
               <form action={approve}><button className="btn-primary">Approve & publish</button></form>
@@ -143,6 +179,25 @@ export default async function ContentDetail({ params }: { params: { id: string }
           {(item.status === "failed" || item.status === "rejected") && (
             <form action={retry}><button className="btn-ghost">Retry</button></form>
           )}
+          {item.status === "published" && (
+            <form action={unpublishAction}>
+              <button className="btn-ghost" title="Take the published row down — keeps the draft for re-editing">
+                Unpublish
+              </button>
+            </form>
+          )}
+          <form
+            action={deleteAction}
+            // Browser confirm is enough here — the action cascades and is
+            // logged in the audit table, which is the real undo trail.
+          >
+            <button
+              className="btn-danger"
+              title="Hard delete — removes the draft, all assets, and any published row"
+            >
+              Delete
+            </button>
+          </form>
         </div>
       </main>
     </div>

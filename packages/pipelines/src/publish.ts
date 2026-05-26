@@ -1,7 +1,8 @@
-import { prisma, logger, type Prisma } from "@ca/shared";
+import { prisma, logger, queue, QUEUES, type Prisma } from "@ca/shared";
 import { schedulePost } from "@ca/providers";
 import { setStatus } from "./util.js";
 import { publishedSeo, type SeoBundle, emptySeo } from "./seo.js";
+import { publicUrlFor } from "./post-review.js";
 
 // Materializes an approved ContentItem into the typed published table the
 // client website reads from. Idempotent — re-running publishes the same row.
@@ -33,6 +34,23 @@ export async function publishContentItem(contentItemId: string): Promise<void> {
       where: { id: contentItemId },
       data: { status: "published", publishedAt: new Date() },
     });
+
+    // Schedule a post-publish live-page review ~90s out so ISR has time to
+    // regenerate. Only for content types with a real public URL.
+    const business = await prisma.business.findUnique({ where: { id: item.businessId } });
+    const publicUrl = business ? publicUrlFor({ type: item.type, slug: item.slug, businessId: item.businessId }, business.slug) : null;
+    if (publicUrl) {
+      try {
+        await queue(QUEUES.post_review).add(
+          `review:${contentItemId}`,
+          { contentItemId, publicUrl },
+          { delay: 90_000, removeOnComplete: 500, removeOnFail: 100 },
+        );
+        logger.info({ contentItemId, publicUrl }, "publish.post_review_enqueued");
+      } catch (err) {
+        logger.warn({ err, contentItemId }, "publish.post_review_enqueue_failed");
+      }
+    }
   } catch (err) {
     logger.error({ err, contentItemId }, "publish.failed");
     await prisma.contentItem.update({

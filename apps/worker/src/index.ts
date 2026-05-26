@@ -16,6 +16,7 @@ import {
   onAnimatedReady,
   onAvatarReady,
   pollAvatarRender,
+  runPostReview,
 } from "@ca/pipelines";
 import { runDigestNow } from "./digest.js";
 
@@ -113,6 +114,14 @@ spawnWorker(QUEUES.animate, async (job) => {
   await onAnimatedReady({ contentItemId: data.contentItemId, videoPath: res.videoPath });
   return res;
 }, { concurrency: 1 }); // ffmpeg is CPU-bound; one at a time on KVM 2
+
+// ── Post-publish live-page review ────────────────────────────────────────
+// Runs ~90s after publish (delay is set by the enqueuer). Fetches the live
+// URL, checks images/links/CTAs/markers, and auto-rolls back critical fails.
+spawnWorker(QUEUES.post_review, async (job) => {
+  const data = job.data as { contentItemId: string; publicUrl: string };
+  return runPostReview(data);
+}, { concurrency: 2 });
 
 logger.info("worker.ready");
 
