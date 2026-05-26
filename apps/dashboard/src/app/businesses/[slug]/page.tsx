@@ -202,6 +202,7 @@ export default async function BusinessDetail({ params }: { params: { slug: strin
                 <option value="youtube_proxy">youtube_proxy</option>
                 <option value="canva">canva</option>
                 <option value="site_db">site_db</option>
+                <option value="site_revalidate">site_revalidate</option>
               </select>
             </div>
             <div>
