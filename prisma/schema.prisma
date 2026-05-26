@@ -385,7 +385,14 @@ model Post {
   excerpt        String   @default("")
   bodyMd         String
   coverImagePath String?
+  // Ordered list of inline image relative paths (ord 1..N from Asset table)
+  // pre-resolved at publish time so the renderer doesn't need to join.
+  // Each entry: { path, alt }
+  inlineImages   Json     @default("[]")
   tags           String[] @default([])
+  // 5-item FAQ extracted from the outline. Rendered as a styled FAQ block
+  // and emitted as FAQPage JSON-LD for rich results.
+  faq            Json     @default("[]")
   publishedAt    DateTime @default(now())
   updatedAt      DateTime @updatedAt
 

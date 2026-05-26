@@ -4,7 +4,7 @@ import { bumpCost, loadBrandContext, makeSlug, markTopicUsed, setStatus, unusedT
 import { routeApproval } from "./route.js";
 import type { SeoBundle } from "./seo.js";
 
-// Full blog pipeline: research → outline (with SEO) → draft → media → critique → route.
+// Full blog pipeline: research → outline (with SEO + image markers + CTA) → draft → media → critique → route.
 // Each step persists progress so a worker restart resumes cleanly.
 
 export interface BlogOutline {
@@ -16,11 +16,22 @@ export interface BlogOutline {
   focusKeyword: string;
   keywords: string[];
   tags: string[];
+  authorMode: "founder" | "team";
   sections: Array<{ h2: string; bullets: string[] }>;
-  imagePrompts: Array<{ prompt: string; alt: string }>;
-  internalLinkSuggestions: Array<{ anchor: string; path: string }>;
+  imagePrompts: Array<{ prompt: string; alt: string; placement: "hero" | "section"; afterSectionIdx?: number }>;
+  ctaMidArticle: { afterSectionIdx: number; title: string; href: string };
+  internalLinks: Array<{ anchor: string; path: string }>;
+  externalCitations: Array<{ source: string; context: string }>;
   faq: Array<{ q: string; a: string }>;
 }
+
+// Site-level author config — wired here rather than in the prompt so we don't
+// pay Claude tokens to repeat names every call. Adjust per business when we
+// onboard more clients.
+const AUTHORS = {
+  founder: { name: "Kavindu Gamlath", url: "https://webx.groovymark.com/about" },
+  team:    { name: "WebX Engineering Team", url: "https://webx.groovymark.com/about" },
+} as const;
 
 export async function runBlogPipeline(contentItemId: string): Promise<void> {
   const item = await prisma.contentItem.findUniqueOrThrow({ where: { id: contentItemId } });
@@ -42,14 +53,11 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
     });
   }
 
-  // 2. Outline (carries SEO fields)
+  // 2. Outline (carries SEO fields, image plan, CTA hint, FAQ)
   await setStatus(contentItemId, "drafting");
   const outlineRes = await claude<BlogOutline>({
     model: "writing",
     json: true,
-    // Schema is rich (sections + bullets + faq + imagePrompts + internal links
-    // + 7 SEO fields). 4096 keeps us safe even when Claude is verbose with
-    // the FAQ answers.
     maxTokens: 4096,
     system: Prompts.BLOG_OUTLINE_SYSTEM,
     user: Prompts.blogOutlineUser(topicTitle, brandBlock),
@@ -59,6 +67,7 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
 
   const outline = outlineRes.json;
   const slug = makeSlug(outline.slug || outline.title);
+  const author = AUTHORS[outline.authorMode] ?? AUTHORS.team;
 
   const seo: SeoBundle = {
     metaTitle: outline.metaTitle ?? null,
@@ -68,7 +77,7 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
     keywords: outline.keywords ?? [],
     ogImageAlt: outline.imagePrompts?.[0]?.alt ?? null,
     faq: outline.faq ?? [],
-    internalLinkSuggestions: outline.internalLinkSuggestions ?? [],
+    internalLinkSuggestions: outline.internalLinks ?? [],
   };
 
   await prisma.contentItem.update({
@@ -81,12 +90,15 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
         outline: outline as unknown as Prisma.InputJsonValue,
         excerpt: outline.excerpt,
         tags: outline.tags,
+        authorName: author.name,
+        authorUrl: author.url,
         seo: seo as unknown as Prisma.InputJsonValue,
+        faq: outline.faq as unknown as Prisma.InputJsonValue,
       } as Prisma.InputJsonValue,
     },
   });
 
-  // 3. Full draft
+  // 3. Full draft with image markers + CTA marker + FAQ section
   const draftRes = await claude<string>({
     model: "writing",
     maxTokens: 8000,
@@ -99,16 +111,17 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
     data: { bodyMd: draftRes.text },
   });
 
-  // 4. Images (hero + inline) — capture alt text per image
+  // 4. Images — generate each one and store with the index encoded in `ord`
+  //    so the publish layer can map [[IMAGE_N]] markers → real URLs.
   await setStatus(contentItemId, "generating_media");
-  const imagePrompts = (outline.imagePrompts ?? []).slice(0, 3);
+  const imagePrompts = (outline.imagePrompts ?? []).slice(0, 5);
   for (const [i, ip] of imagePrompts.entries()) {
     try {
       const img = await generateImage({
         prompt: ip.prompt,
-        quality: i === 0 ? "high" : "medium",
+        quality: ip.placement === "hero" ? "high" : "medium",
         businessSlug: business.slug,
-        filenameHint: `${slug}-${i + 1}`,
+        filenameHint: `${slug}-${i}`,
       });
       await prisma.asset.create({
         data: {
@@ -119,7 +132,7 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
           provider: "openai_image",
           prompt: ip.prompt,
           altText: ip.alt ?? null,
-          ord: i, // 0 = hero/OG image
+          ord: i, // 0 = hero / OG image, 1..N = inline markers
           costUsd: img.costUsd,
         },
       });

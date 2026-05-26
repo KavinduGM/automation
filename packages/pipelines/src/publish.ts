@@ -1,4 +1,4 @@
-import { prisma, logger } from "@ca/shared";
+import { prisma, logger, type Prisma } from "@ca/shared";
 import { schedulePost } from "@ca/providers";
 import { setStatus } from "./util.js";
 import { publishedSeo, type SeoBundle, emptySeo } from "./seo.js";
@@ -59,15 +59,34 @@ function coverFor(item: Item): { path: string | null; alt: string | null } {
   return { path: image?.path ?? null, alt: image?.altText ?? null };
 }
 
+// Inline images = every image asset with ord >= 1, sorted by ord. Each entry
+// keeps the original relative path + alt so the WebX renderer can resolve
+// [[IMAGE_N]] markers without joining back to the Asset table.
+function inlineImagesFor(item: Item): Array<{ path: string; alt: string | null; ord: number }> {
+  return item.assets
+    .filter((a) => a.kind === "image" && a.ord >= 1)
+    .sort((a, b) => a.ord - b.ord)
+    .map((a) => ({ path: a.path, alt: a.altText, ord: a.ord }));
+}
+
 async function publishBlog(item: Item) {
-  const meta = (item.meta ?? {}) as { excerpt?: string; tags?: string[] };
+  const meta = (item.meta ?? {}) as {
+    excerpt?: string;
+    tags?: string[];
+    authorName?: string;
+    authorUrl?: string;
+    faq?: Array<{ q: string; a: string }>;
+  };
   const cover = coverFor(item);
+  const inline = inlineImagesFor(item);
   const seo = extractSeo(item);
   const seoFields = publishedSeo({
     seo,
     fallbackTitle: item.title,
     body: item.bodyMd,
     coverImagePath: cover.path,
+    authorName: meta.authorName ?? null,
+    authorUrl: meta.authorUrl ?? null,
     includeReadingMinutes: true,
   });
   // If the asset doesn't already carry alt, fall back to the OG alt the AI proposed.
@@ -83,7 +102,9 @@ async function publishBlog(item: Item) {
       excerpt: seo.excerpt ?? meta.excerpt ?? "",
       bodyMd: item.bodyMd,
       coverImagePath: cover.path,
+      inlineImages: inline as unknown as Prisma.InputJsonValue,
       tags: meta.tags ?? [],
+      faq: (meta.faq ?? seo.faq ?? []) as unknown as Prisma.InputJsonValue,
       ...seoFields,
     },
     update: {
@@ -91,7 +112,9 @@ async function publishBlog(item: Item) {
       excerpt: seo.excerpt ?? meta.excerpt ?? "",
       bodyMd: item.bodyMd,
       coverImagePath: cover.path,
+      inlineImages: inline as unknown as Prisma.InputJsonValue,
       tags: meta.tags ?? [],
+      faq: (meta.faq ?? seo.faq ?? []) as unknown as Prisma.InputJsonValue,
       ...seoFields,
     },
   });
