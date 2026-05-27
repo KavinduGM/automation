@@ -64,6 +64,19 @@ export default async function AutoReviewPage() {
     take: 250,
   });
 
+  // For busy items, fetch the most recent pipeline event so we can show a
+  // "currently on: X" chip. One query for all of them keeps this cheap.
+  const busyIds = recent
+    .filter((it) => ["queued", "researching", "drafting", "generating_media", "self_critique"].includes(it.status))
+    .map((it) => it.id);
+  const latestEvents = busyIds.length === 0 ? [] : await prisma.pipelineEvent.findMany({
+    where: { contentItemId: { in: busyIds } },
+    orderBy: { createdAt: "desc" },
+    distinct: ["contentItemId"],
+    take: busyIds.length * 3,
+  });
+  const eventByItem = new Map(latestEvents.map((e) => [e.contentItemId, e]));
+
   const unpublishedNeedsAdmin: Item[] = [];
   const layoutFixing: Item[] = [];
   const contentFixing: Item[] = [];
@@ -113,6 +126,7 @@ export default async function AutoReviewPage() {
           empty="No layout fixes in progress."
           tone="warning"
           showFindings
+          latestEvents={eventByItem}
         />
 
         <Bucket
@@ -121,6 +135,7 @@ export default async function AutoReviewPage() {
           items={contentFixing}
           empty="No content fixes in progress."
           tone="warning"
+          latestEvents={eventByItem}
         />
 
         <Bucket
@@ -189,6 +204,7 @@ function Bucket({
   empty,
   tone,
   showFindings,
+  latestEvents,
 }: {
   title: string;
   subtitle: string;
@@ -196,6 +212,7 @@ function Bucket({
   empty: string;
   tone: "info" | "warning" | "critical" | "success" | "muted";
   showFindings?: boolean;
+  latestEvents?: Map<string, { step: string; label: string | null; status: string }>;
 }) {
   const toneClasses = {
     info:     "border-gray-200 bg-white",
@@ -259,6 +276,20 @@ function Bucket({
                       )}
                     </ul>
                   )}
+                  {latestEvents && latestEvents.has(it.id) && (() => {
+                    const ev = latestEvents.get(it.id)!;
+                    const evDotTone =
+                      ev.status === "started"   ? "bg-blue-500 animate-pulse" :
+                      ev.status === "failed"    ? "bg-red-500" :
+                      ev.status === "warning"   ? "bg-amber-500" :
+                                                   "bg-green-500";
+                    return (
+                      <div className="mt-2 inline-flex items-center gap-1.5 text-xs text-gray-700 bg-white border border-gray-200 px-2 py-0.5 rounded">
+                        <span className={`w-1.5 h-1.5 rounded-full ${evDotTone}`} />
+                        Currently on: <span className="font-medium">{ev.label || ev.step}</span>
+                      </div>
+                    );
+                  })()}
                 </div>
                 <StatusPill label={status.label} tone={status.tone} />
               </div>

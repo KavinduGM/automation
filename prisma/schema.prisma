@@ -241,6 +241,9 @@ model ContentItem {
   publishedLandingPage LandingPage?
   publishedSocialPost  SocialPost?
 
+  // Step-level pipeline event trail for the dashboard timeline.
+  pipelineEvents       PipelineEvent[]
+
   @@index([businessId, type, status])
   @@index([businessId, scheduledAt])
   @@unique([businessId, type, slug])
@@ -367,6 +370,34 @@ model AuditLog {
 
   @@index([businessId, at])
   @@index([target])
+}
+
+// Step-level pipeline event trail. One row per meaningful step start /
+// completion / failure during the blog (or other) pipeline run. Drives
+// the timeline view on the content detail page and the "currently on"
+// pill on auto-review cards. Cheap to write (< 25 events per article)
+// and queryable by phase. Cascade-deleted with the ContentItem so the
+// audit footprint matches the item's lifetime.
+model PipelineEvent {
+  id            String      @id @default(cuid())
+  contentItemId String
+  contentItem   ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  // Snake-case identifier, e.g. "outline", "draft", "image_0", "critic",
+  // "publish", "post_review", "post_review_images", "section_regen_<slug>".
+  step          String
+  // Human-readable label for the timeline UI ("Outline · Haiku", "Image #2 · hero").
+  label         String?
+  // started | completed | failed | skipped | warning
+  status        String
+  // Free-form detail message (error text, verdict, cost, etc).
+  message       String?
+  // Step-specific structured data (cost, tokens, finding count, etc).
+  metadata      Json        @default("{}")
+  // Wall-clock duration in milliseconds, set on completion/failure.
+  durationMs    Int?
+  createdAt     DateTime    @default(now())
+
+  @@index([contentItemId, createdAt])
 }
 
 // ── Published content (what client sites read) ─────────────────────────────

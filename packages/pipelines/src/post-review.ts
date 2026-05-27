@@ -30,6 +30,7 @@
 
 import { prisma, logger, queue, QUEUES, brandSiteFor, type Prisma } from "@ca/shared";
 import { revalidateForContent } from "@ca/providers";
+import { logStep } from "./util.js";
 
 // How many layout-fix attempts to allow before escalating to admin.
 const MAX_AUTO_FIX_ATTEMPTS = 2;
@@ -69,6 +70,11 @@ export async function runPostReview(data: PostReviewJobData): Promise<ReviewRepo
   const findings: ReviewFinding[] = [];
   const url = data.publicUrl;
   const attempt = data.attempt ?? 0;
+  await logStep(data.contentItemId, "post_review", "started", {
+    label: `Layout review (attempt ${attempt + 1})`,
+    metadata: { url, attempt },
+  });
+  const reviewT0 = Date.now();
 
   // ── Fetch — cache-bust so we never trust a previously-cached 404 ─────
   // The query param flows through Next.js dynamic routing untouched (the
@@ -197,6 +203,14 @@ export async function runPostReview(data: PostReviewJobData): Promise<ReviewRepo
   if (overall === "critical") {
     await rollback(data.contentItemId, report);
   }
+
+  const eventStatus = overall === "ok" ? "completed" : overall === "warnings" ? "warning" : "failed";
+  await logStep(data.contentItemId, "post_review", eventStatus, {
+    label: `Layout review: ${overall}`,
+    message: findings.length > 0 ? findings.slice(0, 3).map((f) => `[${f.area}] ${f.message}`).join("; ") : undefined,
+    durationMs: Date.now() - reviewT0,
+    metadata: { overall, totalFindings: findings.length, high, med, attempt: attempt + 1 },
+  });
 
   logger.info(
     { contentItemId: data.contentItemId, url, overall, findings: findings.length, attempt: attempt + 1 },

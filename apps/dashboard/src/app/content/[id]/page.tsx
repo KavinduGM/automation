@@ -48,6 +48,15 @@ export default async function ContentDetail({ params }: { params: { id: string }
     include: { business: true, assets: true, webinarIntent: true, caseStudyIntake: true },
   });
   if (!item) notFound();
+  // Pull pipeline event timeline — newest first reads more naturally for
+  // active items (latest progress on top) but chronological for completed
+  // items is more useful for retrospective debugging. Show oldest-first;
+  // the UI scrolls naturally.
+  const events = await prisma.pipelineEvent.findMany({
+    where: { contentItemId: params.id },
+    orderBy: { createdAt: "asc" },
+    take: 200,
+  });
 
   async function save(formData: FormData) {
     "use server";
@@ -317,6 +326,50 @@ export default async function ContentDetail({ params }: { params: { id: string }
             </>
           );
         })()}
+
+        {events.length > 0 && (
+          <div className="card mb-4">
+            <div className="flex items-baseline justify-between mb-3">
+              <h3 className="font-medium">Pipeline timeline</h3>
+              <span className="text-xs text-gray-500">{events.length} event{events.length === 1 ? "" : "s"}</span>
+            </div>
+            <ol className="relative border-l border-gray-200 ml-2 space-y-2 text-xs">
+              {events.map((e) => {
+                const dotTone =
+                  e.status === "completed" ? "bg-green-500" :
+                  e.status === "failed"    ? "bg-red-500" :
+                  e.status === "warning"   ? "bg-amber-500" :
+                  e.status === "skipped"   ? "bg-gray-300" :
+                  /* started */              "bg-blue-500 animate-pulse";
+                const statusTone =
+                  e.status === "completed" ? "text-green-700" :
+                  e.status === "failed"    ? "text-red-700" :
+                  e.status === "warning"   ? "text-amber-700" :
+                  e.status === "skipped"   ? "text-gray-500" :
+                                              "text-blue-700";
+                const time = e.createdAt.toISOString().slice(11, 19);
+                const durationS = e.durationMs ? ` · ${Math.round(e.durationMs / 100) / 10}s` : "";
+                return (
+                  <li key={e.id} className="ml-3 pl-3">
+                    <span className={`absolute -left-[5px] mt-1 w-2.5 h-2.5 rounded-full ${dotTone}`} />
+                    <div className="flex items-baseline gap-2 flex-wrap">
+                      <span className="font-medium">{e.label || e.step}</span>
+                      <span className={`uppercase text-[10px] font-semibold tracking-wide ${statusTone}`}>
+                        {e.status}
+                      </span>
+                      <span className="text-gray-400 ml-auto">{time}{durationS}</span>
+                    </div>
+                    {e.message && (
+                      <div className={`mt-0.5 ${e.status === "failed" ? "text-red-700" : "text-gray-600"}`}>
+                        {e.message}
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          </div>
+        )}
 
         <form action={save} className="card space-y-3">
           <div>

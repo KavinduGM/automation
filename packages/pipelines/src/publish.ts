@@ -1,6 +1,6 @@
 import { prisma, logger, queue, QUEUES, type Prisma } from "@ca/shared";
 import { schedulePost, revalidateForContent } from "@ca/providers";
-import { setStatus } from "./util.js";
+import { setStatus, logStep } from "./util.js";
 import { publishedSeo, type SeoBundle, emptySeo } from "./seo.js";
 import { publicUrlFor } from "./post-review.js";
 
@@ -17,6 +17,8 @@ export async function publishContentItem(contentItemId: string): Promise<void> {
     return;
   }
   await setStatus(contentItemId, "publishing");
+  await logStep(contentItemId, "publish", "started", { label: "Publish to client site" });
+  const publishT0 = Date.now();
 
   try {
     switch (item.type) {
@@ -33,6 +35,10 @@ export async function publishContentItem(contentItemId: string): Promise<void> {
     await prisma.contentItem.update({
       where: { id: contentItemId },
       data: { status: "published", publishedAt: new Date() },
+    });
+    await logStep(contentItemId, "publish", "completed", {
+      label: "Published live",
+      durationMs: Date.now() - publishT0,
     });
 
     // Tell the client site to flush the index + detail pages from its ISR
@@ -71,6 +77,11 @@ export async function publishContentItem(contentItemId: string): Promise<void> {
     }
   } catch (err) {
     logger.error({ err, contentItemId }, "publish.failed");
+    await logStep(contentItemId, "publish", "failed", {
+      label: "Publish",
+      message: String((err as Error).message ?? err),
+      durationMs: Date.now() - publishT0,
+    });
     await prisma.contentItem.update({
       where: { id: contentItemId },
       data: { status: "failed", reviewNotes: String((err as Error).message ?? err) },

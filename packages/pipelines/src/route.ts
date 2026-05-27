@@ -1,6 +1,6 @@
 import { prisma, Prompts, logger, type Prisma } from "@ca/shared";
 import { claude } from "@ca/providers";
-import { bumpCost, loadBrandContext, setStatus, enqueuePublish } from "./util.js";
+import { bumpCost, loadBrandContext, logStep, setStatus, enqueuePublish } from "./util.js";
 import { queue, QUEUES } from "@ca/shared";
 
 // Decides what happens after a piece is drafted: auto-publish, AI-review,
@@ -57,6 +57,8 @@ async function runAiReview(
   item: Awaited<ReturnType<typeof prisma.contentItem.findUniqueOrThrow>>,
   contentFixAttempts: number,
 ): Promise<void> {
+  await logStep(contentItemId, "critic", "started", { label: "AI critic (content review)" });
+  const t0 = Date.now();
   const { brandBlock } = await loadBrandContext(item.businessId);
   const res = await claude<CriticVerdict>({
     model: "routing",
@@ -67,6 +69,12 @@ async function runAiReview(
   });
   await bumpCost(contentItemId, res.costUsd);
   const verdict = res.json;
+  await logStep(contentItemId, "critic", verdict?.verdict === "approve" ? "completed" : "warning", {
+    label: "AI critic",
+    message: verdict ? `verdict: ${verdict.verdict} (${verdict.issues.length} issues)` : "no JSON returned",
+    durationMs: Date.now() - t0,
+    metadata: { verdict: verdict?.verdict, issueCount: verdict?.issues.length, costUsd: res.costUsd },
+  });
 
   if (!verdict) {
     logger.warn({ contentItemId }, "route.critic_missing_json → publishing without further review");

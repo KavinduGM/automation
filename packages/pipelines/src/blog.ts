@@ -1,6 +1,6 @@
 import { prisma, Prompts, logger, brandServicesBlock, brandSiteFor, env, type Prisma } from "@ca/shared";
 import { claude, generateImage, grokBatchedBriefs, sendEmail } from "@ca/providers";
-import { bumpCost, loadBrandContext, makeSlug, markTopicUsed, setStatus, unusedTopicFor } from "./util.js";
+import { bumpCost, loadBrandContext, logStep, makeSlug, markTopicUsed, setStatus, unusedTopicFor } from "./util.js";
 import { routeApproval } from "./route.js";
 import type { SeoBundle } from "./seo.js";
 
@@ -99,7 +99,10 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
   let topicCandidateId = item.topicCandidateId;
   if (!topicTitle) {
     const t = await unusedTopicFor(item.businessId);
-    if (!t) throw new Error("No unused topic candidate available — wait for next research cycle");
+    if (!t) {
+      await logStep(contentItemId, "topic", "failed", { label: "Pick topic", message: "No unused topic candidate available" });
+      throw new Error("No unused topic candidate available — wait for next research cycle");
+    }
     topicTitle = t.title;
     topicCandidateId = t.id;
     await markTopicUsed(t.id);
@@ -107,6 +110,9 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
       where: { id: contentItemId },
       data: { title: topicTitle, topicCandidateId: t.id },
     });
+    await logStep(contentItemId, "topic", "completed", { label: "Topic selected", message: topicTitle, metadata: { source: t.source, score: t.score } });
+  } else {
+    await logStep(contentItemId, "topic", "completed", { label: "Topic provided", message: topicTitle });
   }
 
   // Pull the original topic candidate so we can use any research brief
@@ -135,6 +141,8 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
   // System prompt is cached so a worker drafting multiple articles per
   // window only pays full price on the first call.
   const outlineSystem = [{ text: Prompts.BLOG_OUTLINE_SYSTEM, cache: true }];
+  await logStep(contentItemId, "outline", "started", { label: "Outline + SEO metadata (Haiku)" });
+  const outlineT0 = Date.now();
   let outlineRes = await claude<BlogOutline>({
     model: "routing",
     json: true,
@@ -142,11 +150,15 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
     system: outlineSystem,
     user: Prompts.blogOutlineUser(topicTitle, brandBlock, servicesBlock, researchContext),
   });
-  if (!outlineRes.json) throw new Error("blog: outline JSON missing");
+  if (!outlineRes.json) {
+    await logStep(contentItemId, "outline", "failed", { label: "Outline", message: "JSON missing" });
+    throw new Error("blog: outline JSON missing");
+  }
   await bumpCost(contentItemId, outlineRes.costUsd);
 
   const issues = validateOutlineStructure(outlineRes.json);
   if (issues.length > 0) {
+    await logStep(contentItemId, "outline_retry", "started", { label: "Outline retry (off-spec)", message: issues.slice(0, 3).join("; ") });
     logger.warn({ contentItemId, issues }, "blog.outline_structure_off_spec_retrying");
     outlineRes = await claude<BlogOutline>({
       model: "routing",
@@ -159,9 +171,18 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
         issues.map((i) => `  - ${i}`).join("\n") +
         `\n\nFix exactly those counts. Return JSON only.`,
     });
-    if (!outlineRes.json) throw new Error("blog: outline JSON missing on retry");
+    if (!outlineRes.json) {
+      await logStep(contentItemId, "outline_retry", "failed", { label: "Outline retry", message: "JSON missing on retry" });
+      throw new Error("blog: outline JSON missing on retry");
+    }
     await bumpCost(contentItemId, outlineRes.costUsd);
+    await logStep(contentItemId, "outline_retry", "completed", { label: "Outline retry" });
   }
+  await logStep(contentItemId, "outline", "completed", {
+    label: "Outline + SEO metadata",
+    durationMs: Date.now() - outlineT0,
+    metadata: { costUsd: outlineRes.costUsd, slug: outlineRes.json.slug, focusKeyword: outlineRes.json.focusKeyword },
+  });
   outline = outlineRes.json;
   const slug = makeSlug(outline.slug || outline.title);
   const authors = AUTHORS_BY_BUSINESS[business.slug] ?? DEFAULT_AUTHORS;
@@ -217,6 +238,8 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
         { text: correctionContext, cache: false },
       ]
     : [{ text: Prompts.BLOG_DRAFT_SYSTEM, cache: true }];
+  await logStep(contentItemId, "draft", "started", { label: "Article body (Sonnet)" });
+  const draftT0 = Date.now();
   const draftRes = await claude<string>({
     model: "writing",
     maxTokens: 14000,
@@ -224,11 +247,21 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
     user: Prompts.blogDraftUser(outline, brandBlock, servicesBlock),
   });
   await bumpCost(contentItemId, draftRes.costUsd);
+  await logStep(contentItemId, "draft", "completed", {
+    label: "Article body",
+    durationMs: Date.now() - draftT0,
+    metadata: { costUsd: draftRes.costUsd, chars: draftRes.text.length },
+  });
 
-  // Post-process: belt-and-suspenders strip of any em/en dashes Claude let
-  // through. Substitute with comma+space which is almost always semantically
-  // closest. (Trailing/leading whitespace handled.)
+  // Post-process: belt-and-suspenders strip of any em/en dashes + AI tells
+  // Claude let through. Substitute with comma+space which is almost always
+  // semantically closest.
   const cleanedBody = scrubAiTells(scrubDashes(draftRes.text));
+  const scrubbed = draftRes.text.length - cleanedBody.length;
+  await logStep(contentItemId, "style_scrub", "completed", {
+    label: "Em-dash + AI-tells scrub",
+    metadata: { charsRemoved: scrubbed },
+  });
   await prisma.contentItem.update({
     where: { id: contentItemId },
     data: { bodyMd: cleanedBody },
@@ -238,6 +271,7 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
   //    so the publish layer can map [[IMAGE_N]] markers → real URLs.
   //    Skipped on text-only auto-fixes; existing assets carry over.
   if (fixScope === "text") {
+    await logStep(contentItemId, "images", "skipped", { label: "Images (text-only fix)" });
     logger.info(
       { contentItemId, layoutAttempt, contentAttempt },
       "blog.skipping_images_text_only_fix",
@@ -248,7 +282,9 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
 
   // 5. Self-critique → route
   await setStatus(contentItemId, "self_critique");
+  await logStep(contentItemId, "route_approval", "started", { label: "Approval routing" });
   await routeApproval(contentItemId);
+  await logStep(contentItemId, "route_approval", "completed", { label: "Approval routing" });
 }
 
 // Section-level content fix. Parses the existing bodyMd into H2 sections,
@@ -457,10 +493,14 @@ async function runImageGeneration(
   let succeeded = 0;
   for (const [i, ip] of imagePrompts.slice(0, 5).entries()) {
     if (ordsToGenerate && !ordsToGenerate.has(i)) continue;
+    const isHero = ip.placement === "hero";
+    const label = `Image #${i}${isHero ? " · hero (cover)" : ""}`;
+    await logStep(contentItemId, `image_${i}`, "started", { label });
+    const imgT0 = Date.now();
     try {
       const img = await generateImage({
         prompt: ip.prompt,
-        quality: ip.placement === "hero" ? "high" : "medium",
+        quality: isHero ? "high" : "medium",
         businessSlug,
         filenameHint: `${slug}-${i}`,
       });
@@ -479,10 +519,20 @@ async function runImageGeneration(
       });
       await bumpCost(contentItemId, img.costUsd);
       succeeded += 1;
+      await logStep(contentItemId, `image_${i}`, "completed", {
+        label,
+        durationMs: Date.now() - imgT0,
+        metadata: { costUsd: img.costUsd, quality: isHero ? "high" : "medium" },
+      });
     } catch (err) {
       const message = (err as Error).message ?? String(err);
       logger.error({ err, prompt: ip.prompt, ord: i }, "blog.image_failed");
       errors.push({ ord: i, prompt: ip.prompt, message });
+      await logStep(contentItemId, `image_${i}`, "failed", {
+        label,
+        message,
+        durationMs: Date.now() - imgT0,
+      });
     }
   }
   // Persist the error list (and clear it on success) so the dashboard can

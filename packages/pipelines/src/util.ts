@@ -62,6 +62,67 @@ export async function markTopicUsed(id: string) {
   await prisma.topicCandidate.update({ where: { id }, data: { usedAt: new Date() } });
 }
 
+// ── Pipeline step event logging ──────────────────────────────────────
+// Single write per call; powers the timeline view on the content detail
+// page. Safe to call from anywhere in the pipeline — failures are logged
+// but never thrown (instrumenting must not break the pipeline itself).
+
+export type PipelineStepStatus = "started" | "completed" | "failed" | "skipped" | "warning";
+
+export interface LogStepOpts {
+  label?: string;
+  message?: string;
+  metadata?: Record<string, unknown>;
+  durationMs?: number;
+}
+
+export async function logStep(
+  contentItemId: string,
+  step: string,
+  status: PipelineStepStatus,
+  opts: LogStepOpts = {},
+): Promise<void> {
+  try {
+    await prisma.pipelineEvent.create({
+      data: {
+        contentItemId,
+        step,
+        status,
+        label: opts.label ?? null,
+        message: opts.message ?? null,
+        metadata: (opts.metadata ?? {}) as Prisma.InputJsonValue,
+        durationMs: opts.durationMs ?? null,
+      },
+    });
+  } catch (err) {
+    logger.warn({ err, contentItemId, step, status }, "logStep.failed");
+  }
+}
+
+// Wrap an async step with automatic start/complete/failed event logging.
+// On thrown error, logs failed (with error message) then re-throws.
+export async function step<T>(
+  contentItemId: string,
+  name: string,
+  label: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  await logStep(contentItemId, name, "started", { label });
+  const t0 = Date.now();
+  try {
+    const result = await fn();
+    await logStep(contentItemId, name, "completed", { label, durationMs: Date.now() - t0 });
+    return result;
+  } catch (err) {
+    await logStep(contentItemId, name, "failed", {
+      label,
+      message: (err as Error).message ?? String(err),
+      durationMs: Date.now() - t0,
+    });
+    throw err;
+  }
+}
+
 // Enqueue the publish job for an approved item, respecting any
 // scheduledAt slot on the ContentItem. If scheduledAt is in the future,
 // sets status="scheduled" and asks BullMQ to delay the job until that
