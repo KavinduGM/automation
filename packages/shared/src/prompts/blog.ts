@@ -49,11 +49,33 @@ Output JSON only, matching exactly this schema:
       "prompt":         string,      //   [1] placement=section, afterSectionIdx=1
       "alt":            string,      //   [2] placement=section, afterSectionIdx=3
       "placement":      "hero" | "section",  //  [3] placement=section, afterSectionIdx=5
-      "afterSectionIdx":number       // EDITORIAL prompt — no text in image; one clear subject;
-                                     // professional photo OR clean illustration; brand-safe.
-                                     // alt: 8-14 word factual description.
+      "afterSectionIdx":number,
+      "style":          "photo" | "diagram"  // body images only — ignored for hero
     }
   ],
+  // ── IMAGE PROMPT RULES — read carefully ─────────────────────────────
+  // [0] HERO is BRAND-TEMPLATED. The pipeline composes the cover image
+  //     from your brand kit (colors, typography, device frame) + the
+  //     "prompt" field, which here is a SHORT SUBJECT HINT describing
+  //     what should be visible ON THE DEVICE SCREEN — NOT a full image
+  //     prompt. Be specific about the article's topic. Examples:
+  //       - "a CRM dashboard showing pipeline stages with revenue charts"
+  //       - "a Next.js code editor with a React component file open"
+  //       - "an AI chatbot conversation interface with a product question thread"
+  //     Keep it under 20 words. Do not describe the layout, colors, or
+  //     "real photograph" — the brand template handles all of that. style is ignored.
+  //
+  // [1..3] BODY IMAGES are direct prompts. Pick the right style per image:
+  //     - "photo": real-world photographic scene. NO text in the image. NO labels.
+  //                Use for human-oriented sections (someone working, a team meeting,
+  //                a workspace). Brand-safe, no stock-photo clichés.
+  //     - "diagram": clean flat illustration in the brand color palette. LABELS
+  //                  AND SHORT TEXT ARE ALLOWED AND ENCOURAGED. Use for
+  //                  architecture / workflow / data-flow / process / framework
+  //                  diagrams. Always name the parts — empty shapes are useless.
+  //                  Example: a 5-step pipeline with labeled stages, an
+  //                  architecture diagram with labeled service boxes.
+  // alt text: 8-14 word factual description regardless of style.
 
   "ctaMidArticle": {                 // mid-article InlineCTABanner
     "afterSectionIdx": 3,            // FIXED — always after sections[3] (implementation patterns)

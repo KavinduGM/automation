@@ -19,7 +19,13 @@ export interface BlogOutline {
   primaryServiceSlug: string;
   authorMode: "founder" | "team";
   sections: Array<{ h2: string; bullets: string[] }>;
-  imagePrompts: Array<{ prompt: string; alt: string; placement: "hero" | "section"; afterSectionIdx?: number }>;
+  imagePrompts: Array<{
+    prompt: string;                       // body images: full image prompt; hero: short subject hint (e.g. "a CRM analytics dashboard")
+    alt: string;                          // alt text for accessibility + SEO
+    placement: "hero" | "section";
+    afterSectionIdx?: number;
+    style?: "photo" | "diagram";          // body images only; ignored for hero. Diagrams may include short labels in the image.
+  }>;
   ctaMidArticle: { afterSectionIdx: number; title: string; href: string };
   ctaPreFaq: { title: string; href: string };
   internalLinks: Array<{ anchor: string; path: string }>;
@@ -277,7 +283,7 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
       "blog.skipping_images_text_only_fix",
     );
   } else {
-    await runImageGeneration(contentItemId, business.id, business.slug, slug, outline.imagePrompts ?? []);
+    await runImageGeneration(contentItemId, business.id, business.slug, slug, outline.imagePrompts ?? [], outline.title);
   }
 
   // 5. Self-critique → route
@@ -463,6 +469,7 @@ async function regenImagesOnly(
       business.slug,
       slug,
       savedOutline.imagePrompts,
+      savedOutline.title,
       failedOrds,
     );
     return;
@@ -470,7 +477,62 @@ async function regenImagesOnly(
 
   // Full image regen — no per-image error info, wipe all and try fresh.
   await prisma.asset.deleteMany({ where: { contentItemId, kind: "image" } });
-  await runImageGeneration(contentItemId, business.id, business.slug, slug, savedOutline.imagePrompts);
+  await runImageGeneration(contentItemId, business.id, business.slug, slug, savedOutline.imagePrompts, savedOutline.title);
+}
+
+// Build the brand-templated cover image prompt. Every cover image in the
+// brand's catalog uses the same composition so articles look like a
+// series, not a stock-photo collage. The article-specific piece is the
+// "subject hint" (what's on the device screen) supplied by the outline.
+function buildBrandCoverPrompt(
+  style: NonNullable<ReturnType<typeof brandSiteFor>>["coverImageStyle"],
+  articleTitle: string,
+  coverSubject: string,
+): string {
+  if (!style) return `${coverSubject}. ${articleTitle}.`;
+  const headline = articleTitle.toUpperCase();
+  // Short-form line list keeps the prompt token-efficient.
+  return [
+    `Create a 16:9 brand cover image — wide horizontal composition.`,
+    `Background: clean studio surface in ${style.backgroundColor}.`,
+    `Accent color: ${style.themeColor} — used ONLY for the headline typography and a small badge.`,
+    `Right side of the frame: ${style.deviceHint}, screen visible and in focus.`,
+    `The device screen displays: ${coverSubject}.`,
+    `Left side of the frame: vertical text block —`,
+    `  Headline (large, bold, color ${style.themeColor}): "${headline}"`,
+    `  Below the headline, a small rounded pill badge — background ${style.themeColor}, text white — saying "Blog".`,
+    style.extraStyleHints ? `Style: ${style.extraStyleHints}.` : "",
+    `Rendering rules: the headline text must be clearly legible and exactly as written. No extra background text, no watermarks, no AI artefacts, no garbled glyphs.`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+// Augment a body image prompt with style-specific guardrails. Photos get
+// the no-text + no-stock-cliché reminder; diagrams get permission to use
+// labels (which is the whole point of a diagram) and a brand-color hint.
+function augmentBodyPrompt(
+  rawPrompt: string,
+  style: "photo" | "diagram",
+  brandThemeColor: string | undefined,
+): string {
+  if (style === "diagram") {
+    const colorHint = brandThemeColor
+      ? `Use ${brandThemeColor} as the primary accent color for shapes, arrows, and label backgrounds.`
+      : "Use a single brand accent color throughout.";
+    return [
+      rawPrompt,
+      `Clean flat illustration on a white background.`,
+      colorHint,
+      `Every shape MUST have a short, crisp, clearly readable label (1-3 words). Empty shapes are not allowed — name what each box, circle, or arrow represents.`,
+      `Labels must render as accurate text (no garbled or repeated characters). No decorative chrome, no extra background art.`,
+    ].join(" ");
+  }
+  // photo (default)
+  return [
+    rawPrompt,
+    `Real photograph. No text in the image, no labels, no watermarks. Avoid stock-photo clichés (no smiling-team-around-a-laptop). Brand-safe, agency-grade.`,
+  ].join(" ");
 }
 
 // Run the image generation loop and capture any per-image errors visibly on
@@ -485,22 +547,40 @@ async function runImageGeneration(
   businessSlug: string,
   slug: string,
   imagePrompts: BlogOutline["imagePrompts"],
+  articleTitle: string,
   onlyOrds?: number[],
 ): Promise<void> {
   await setStatus(contentItemId, "generating_media");
   const ordsToGenerate = onlyOrds && onlyOrds.length > 0 ? new Set(onlyOrds) : null;
+  const brand = brandSiteFor(businessSlug);
   const errors: Array<{ ord: number; prompt: string; message: string }> = [];
   let succeeded = 0;
   for (const [i, ip] of imagePrompts.slice(0, 5).entries()) {
     if (ordsToGenerate && !ordsToGenerate.has(i)) continue;
     const isHero = ip.placement === "hero";
-    const label = `Image #${i}${isHero ? " · hero (cover)" : ""}`;
+    // Build the actual prompt sent to OpenAI:
+    //   - hero: brand-templated cover composition + AI-supplied subject hint
+    //   - body photo: raw prompt + safety rails (no text, no clichés)
+    //   - body diagram: raw prompt + flat-illustration + label rules + brand color
+    let finalPrompt: string;
+    if (isHero) {
+      finalPrompt = brand?.coverImageStyle
+        ? buildBrandCoverPrompt(brand.coverImageStyle, articleTitle, ip.prompt)
+        : ip.prompt;
+    } else {
+      finalPrompt = augmentBodyPrompt(ip.prompt, ip.style ?? "photo", brand?.coverImageStyle?.themeColor);
+    }
+    const styleLabel = isHero ? "brand cover" : (ip.style ?? "photo");
+    const label = `Image #${i}${isHero ? " · hero (cover)" : ` · ${styleLabel}`}`;
     await logStep(contentItemId, `image_${i}`, "started", { label });
     const imgT0 = Date.now();
     try {
       const img = await generateImage({
-        prompt: ip.prompt,
-        quality: isHero ? "high" : "medium",
+        prompt: finalPrompt,
+        // Drop hero from "high" to "medium". The brand template carries the
+        // visual lift; we don't need photo-grade rendering — and "high" was
+        // costing ~2.7× medium for a marginal quality difference.
+        quality: "medium",
         businessSlug,
         filenameHint: `${slug}-${i}`,
       });
@@ -511,7 +591,7 @@ async function runImageGeneration(
           kind: "image",
           path: img.relPath,
           provider: "openai_image",
-          prompt: ip.prompt,
+          prompt: finalPrompt,
           altText: ip.alt ?? null,
           ord: i, // 0 = hero / OG image, 1..N = inline markers
           costUsd: img.costUsd,
@@ -522,12 +602,12 @@ async function runImageGeneration(
       await logStep(contentItemId, `image_${i}`, "completed", {
         label,
         durationMs: Date.now() - imgT0,
-        metadata: { costUsd: img.costUsd, quality: isHero ? "high" : "medium" },
+        metadata: { costUsd: img.costUsd, quality: "medium", style: styleLabel },
       });
     } catch (err) {
       const message = (err as Error).message ?? String(err);
-      logger.error({ err, prompt: ip.prompt, ord: i }, "blog.image_failed");
-      errors.push({ ord: i, prompt: ip.prompt, message });
+      logger.error({ err, prompt: finalPrompt, ord: i }, "blog.image_failed");
+      errors.push({ ord: i, prompt: finalPrompt, message });
       await logStep(contentItemId, `image_${i}`, "failed", {
         label,
         message,

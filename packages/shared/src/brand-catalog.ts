@@ -20,6 +20,17 @@ export interface BrandSite {
   quotePath: string;               // typically "/quote" or "/contact"
   caseStudiesPath: string;         // typically "/portfolio" or "/case-studies"
   services: BrandService[];
+  // Branded cover image style. Used to build a deterministic cover prompt
+  // for every blog/case-study/resource, replacing the random photo
+  // approach we started with. The "subject" of each cover is supplied
+  // per-article by the outline (e.g. "a CRM dashboard"); everything else
+  // is brand-locked so covers look like a series, not a stock collage.
+  coverImageStyle?: {
+    themeColor: string;            // e.g. "#6D28D9" — used for headline color + accent panel
+    backgroundColor: string;       // e.g. "#FFFFFF" — clean studio background
+    deviceHint: string;            // e.g. "modern laptop or iMac with the screen visible"
+    extraStyleHints?: string;      // free-form, e.g. "real photograph, studio lighting, mug + plant on desk"
+  };
 }
 
 // GroovyMark WebX — sourced from /Users/kavindugamlath/Desktop/Web Agency Website/lib/services.js
@@ -29,6 +40,12 @@ const GROOVYMARK_WEBX: BrandSite = {
   contactPath: "/contact",
   quotePath: "/quote",
   caseStudiesPath: "/portfolio",
+  coverImageStyle: {
+    themeColor: "#6D28D9",
+    backgroundColor: "#FFFFFF",
+    deviceHint: "modern laptop or iMac with the screen visible at a slight angle",
+    extraStyleHints: "real photograph, studio lighting, shallow depth of field, white desk surface, a coffee mug and small plant in soft focus background",
+  },
   services: [
     // Web Development (14)
     { slug: "business-website",     category: "web-development", title: "Business Website",                   tagline: "A polished digital storefront that earns trust on first scroll." },
