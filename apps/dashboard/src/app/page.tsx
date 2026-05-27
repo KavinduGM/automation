@@ -30,7 +30,7 @@ export default async function Overview() {
   }
 
   return (
-    <div className="flex">
+    <div className="flex flex-col md:flex-row">
       <Nav />
       <main className="flex-1 p-6 max-w-6xl">
         <h1 className="text-xl font-semibold mb-4">Overview</h1>
@@ -44,7 +44,7 @@ export default async function Overview() {
                   <div className="font-medium">{b.name}</div>
                   <a href={`/businesses/${b.slug}`} className="text-xs text-brand-700 hover:underline">manage</a>
                 </div>
-                <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
                   <Cell label="queued"     n={c.queued ?? 0} />
                   <Cell label="drafting"   n={c.drafting ?? 0} />
                   <Cell label="review"     n={c.review ?? 0} />

@@ -184,7 +184,7 @@ export default async function ContentDetail({ params }: { params: { id: string }
   }
 
   return (
-    <div className="flex">
+    <div className="flex flex-col md:flex-row">
       <Nav businessSlug={item.business.slug} />
       <main className="flex-1 p-6 max-w-4xl">
         <div className="flex items-center justify-between mb-4">

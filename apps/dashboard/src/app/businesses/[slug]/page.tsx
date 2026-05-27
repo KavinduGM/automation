@@ -227,7 +227,7 @@ export default async function BusinessDetail({
   }
 
   return (
-    <div className="flex">
+    <div className="flex flex-col md:flex-row">
       <Nav businessSlug={biz.slug} />
       <main className="flex-1 p-6 max-w-4xl space-y-6">
         <div>
@@ -339,7 +339,7 @@ export default async function BusinessDetail({
             <div className="text-xs font-medium text-gray-600 mb-2">
               {editingPlan ? `Edit plan: ${editingPlan.contentType}` : "Add / update plan"}
             </div>
-            <form action={savePlan} className="grid grid-cols-2 gap-2 items-end">
+            <form action={savePlan} className="grid grid-cols-1 sm:grid-cols-2 gap-2 items-end">
               <div>
                 <label className="label">Type</label>
                 <select className="input" name="contentType" defaultValue={editingPlan?.contentType} disabled={!!editingPlan}>
@@ -363,7 +363,7 @@ export default async function BusinessDetail({
                   {MODES.map(t => <option key={t} value={t}>{t}</option>)}
                 </select>
               </div>
-              <div className="col-span-2">
+              <div className="sm:col-span-2">
                 <label className="label">Publish slots (comma-separated, in plan timezone)</label>
                 <input
                   className="input"
@@ -375,7 +375,7 @@ export default async function BusinessDetail({
                   When set, articles are created at these wall-clock times daily. Past slots roll to tomorrow. <b>Slot count overrides Per period</b> — one article per slot per day.
                 </div>
               </div>
-              <div className="col-span-2">
+              <div className="sm:col-span-2">
                 <label className="label">Timezone (IANA)</label>
                 <select className="input" name="timezone" defaultValue={editingPlan?.timezone ?? "America/New_York"}>
                   <option value="America/New_York">America/New_York (Eastern)</option>
@@ -385,12 +385,12 @@ export default async function BusinessDetail({
                   <option value="UTC">UTC</option>
                 </select>
               </div>
-              <label className="text-xs flex items-center gap-2 col-span-2">
+              <label className="text-xs flex items-center gap-2 sm:col-span-2">
                 <input type="checkbox" name="active" defaultChecked={editingPlan ? editingPlan.active : true} /> active
               </label>
-              <button className="btn-primary col-span-2">{editingPlan ? "Save changes" : "Save plan"}</button>
+              <button className="btn-primary sm:col-span-2">{editingPlan ? "Save changes" : "Save plan"}</button>
               {editingPlan && (
-                <a className="btn-ghost col-span-2 text-center" href={`/businesses/${biz.slug}`}>Cancel</a>
+                <a className="btn-ghost sm:col-span-2 text-center" href={`/businesses/${biz.slug}`}>Cancel</a>
               )}
             </form>
           </div>

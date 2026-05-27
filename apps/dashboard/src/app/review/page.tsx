@@ -15,7 +15,7 @@ export default async function ReviewQueue() {
   });
 
   return (
-    <div className="flex">
+    <div className="flex flex-col md:flex-row">
       <Nav />
       <main className="flex-1 p-6 max-w-4xl">
         <h1 className="text-xl font-semibold mb-1">Review queue ({items.length})</h1>

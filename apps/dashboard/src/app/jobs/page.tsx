@@ -12,7 +12,7 @@ export default async function Jobs() {
     include: { business: true },
   });
   return (
-    <div className="flex">
+    <div className="flex flex-col md:flex-row">
       <Nav />
       <main className="flex-1 p-6 max-w-5xl">
         <h1 className="text-xl font-semibold mb-4">Recent activity</h1>

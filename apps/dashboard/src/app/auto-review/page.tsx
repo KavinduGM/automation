@@ -100,7 +100,7 @@ export default async function AutoReviewPage() {
   }
 
   return (
-    <div className="flex">
+    <div className="flex flex-col md:flex-row">
       <Nav />
       <main className="flex-1 p-6 max-w-5xl">
         <div className="flex items-baseline justify-between mb-6">

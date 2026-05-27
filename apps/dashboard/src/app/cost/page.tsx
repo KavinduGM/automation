@@ -26,7 +26,7 @@ export default async function CostPage() {
   const totalMonth = rows.reduce((a, r) => a + (r._sum.costUsd ?? 0), 0);
 
   return (
-    <div className="flex">
+    <div className="flex flex-col md:flex-row">
       <Nav />
       <main className="flex-1 p-6 max-w-3xl">
         <h1 className="text-xl font-semibold mb-1">Cost (month-to-date)</h1>
