@@ -237,17 +237,34 @@ function deterministicCritic(
     }
   }
 
-  // Banned words from the brand kit.
+  // Banned words from the brand kit — context-aware.
+  //
+  // Two rules:
+  //   1. Parse parenthetical qualifiers ("leverage (as buzzword)" → "leverage")
+  //      so the actual word being matched is the lemma the user means.
+  //   2. Only flag when the word appears in a sentence that ALSO mentions
+  //      the brand by self-reference ("we", "our", "us", brand name).
+  //      Banned words are fine in contrastive/literal context:
+  //        "Some agencies offer cheap web development, but..."
+  //        "growth is predictable and cheap, not chaotic"
+  //      They're only a problem when positioning the brand itself.
   for (const raw of bannedWords) {
-    const word = raw.trim();
+    const word = parseBannedWordLemma(raw);
     if (!word) continue;
-    const pattern = new RegExp(`\\b${escapeRegex(word)}\\b`, "i");
-    if (pattern.test(body)) {
-      issues.push({
-        severity: "high",
-        where: "Body",
-        what: `Banned word "${word}" appears in body`,
-      });
+    const pattern = new RegExp(`\\b${escapeRegex(word)}\\b`, "gi");
+    let flaggedOnce = false;
+    for (const match of body.matchAll(pattern)) {
+      if (flaggedOnce) break;
+      const idx = match.index ?? 0;
+      const sentence = extractSentenceAt(body, idx);
+      if (isBrandSelfReference(sentence, brandName)) {
+        issues.push({
+          severity: "high",
+          where: "Body",
+          what: `Banned word "${word}" used in brand self-description: "${truncate(sentence, 120)}"`,
+        });
+        flaggedOnce = true;
+      }
     }
   }
 
@@ -295,4 +312,41 @@ function containsKeywordVariant(text: string, keyword: string): boolean {
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Strip the parenthetical qualifier off a banned-word entry, so the brand
+// kit can store contextual notes without breaking detection:
+//   "leverage (as buzzword)" → "leverage"
+//   "scalable (as filler)"   → "scalable"
+//   "robust"                  → "robust"
+function parseBannedWordLemma(raw: string): string {
+  return raw.replace(/\s*\([^)]*\)\s*/g, "").trim();
+}
+
+// Pull the sentence around a character index. Sentence boundaries are
+// terminal punctuation (. ! ?) or newlines. Used to evaluate whether a
+// matched banned word lives in a brand self-referential sentence.
+function extractSentenceAt(text: string, charIndex: number): string {
+  const terminators = /[.!?\n]/;
+  let start = Math.max(0, charIndex);
+  while (start > 0 && !terminators.test(text[start - 1]!)) start--;
+  let end = charIndex;
+  while (end < text.length && !terminators.test(text[end]!)) end++;
+  // Include the terminal punctuation when present.
+  if (end < text.length) end++;
+  return text.slice(start, end).trim();
+}
+
+// A sentence "self-references" the brand when it uses first-person plural
+// pronouns OR explicitly names the brand. These are the sentences where a
+// banned word would constitute the brand describing itself negatively.
+function isBrandSelfReference(sentence: string, brandName: string | undefined): boolean {
+  const s = sentence.toLowerCase();
+  if (/\b(we|we'?re|we'?ve|we'?ll|our|ours|us)\b/.test(s)) return true;
+  if (brandName && s.includes(brandName.toLowerCase())) return true;
+  return false;
+}
+
+function truncate(s: string, n: number): string {
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
