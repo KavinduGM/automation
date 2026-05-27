@@ -160,6 +160,7 @@ export default async function ContentDetail({ params }: { params: { id: string }
         {(() => {
           const meta = (item.meta ?? {}) as {
             postReview?: { overall?: string; checkedAt?: string; findings?: Array<{ area: string; message: string; severity: string }> };
+            critic?: { issues?: Array<{ severity?: string; where?: string; what?: string }>; verdict?: string; error?: string };
             lastFindings?: Array<{ area: string; message: string; severity?: string }>;
             imageErrors?: Array<{ ord: number; prompt: string; message: string }>;
             imagesGenerated?: number;
@@ -170,8 +171,10 @@ export default async function ContentDetail({ params }: { params: { id: string }
             contentFixGivenUp?: boolean;
             fixScope?: "text" | "images" | "both";
           };
-          const findings = meta.lastFindings ?? meta.postReview?.findings ?? [];
-          const showFindings = findings.length > 0;
+          // Content critic issues are stored on meta.critic.issues — pre-publish, content-quality.
+          const criticIssues = meta.critic?.issues ?? [];
+          // Layout review findings live on meta.postReview.findings — post-publish, rendering.
+          const layoutFindings = meta.postReview?.findings ?? [];
           const imgErrors = meta.imageErrors ?? [];
           return (
             <>
@@ -201,24 +204,45 @@ export default async function ContentDetail({ params }: { params: { id: string }
                 </div>
               )}
 
-              {showFindings && (
-                <div className="card mb-4 bg-red-50 border-red-200 text-sm">
-                  <div className="font-medium mb-2 text-red-900">
-                    Post-review findings ({findings.length})
+              {criticIssues.length > 0 && (
+                <div className="card mb-4 bg-amber-50 border-amber-200 text-sm">
+                  <div className="font-medium mb-2 text-amber-900">
+                    Content critic findings — pre-publish ({criticIssues.length})
+                    {meta.critic?.verdict && <span className="ml-2 text-amber-700 font-normal">verdict: {meta.critic.verdict}</span>}
                   </div>
                   <ul className="space-y-1">
-                    {findings.map((f, idx) => {
-                      const sev = (f as { severity?: string }).severity ?? "med";
-                      const sevBg = sev === "high" ? "bg-red-200 text-red-900" : sev === "med" ? "bg-orange-200 text-orange-900" : "bg-gray-200 text-gray-800";
-                      const area = (f as { area?: string }).area ?? "issue";
-                      const message = (f as { message?: string }).message ?? "";
-                      const locations = findLocations(message, item.bodyMd);
+                    {criticIssues.map((i, idx) => {
+                      const sev = i.severity ?? "med";
+                      const sevBg = sev === "high" ? "bg-red-200 text-red-900" : sev === "med" ? "bg-amber-200 text-amber-900" : "bg-gray-200 text-gray-800";
                       return (
                         <li key={idx} className="text-xs">
                           <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium mr-2 ${sevBg}`}>
                             {sev}
                           </span>
-                          <span className="text-gray-500">[{area}]</span> {message}
+                          <span className="text-gray-500">[{i.where ?? "content"}]</span> {i.what ?? ""}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
+
+              {layoutFindings.length > 0 && (
+                <div className="card mb-4 bg-red-50 border-red-200 text-sm">
+                  <div className="font-medium mb-2 text-red-900">
+                    Layout review findings — post-publish ({layoutFindings.length})
+                  </div>
+                  <ul className="space-y-1">
+                    {layoutFindings.map((f, idx) => {
+                      const sev = f.severity ?? "med";
+                      const sevBg = sev === "high" ? "bg-red-200 text-red-900" : sev === "med" ? "bg-orange-200 text-orange-900" : "bg-gray-200 text-gray-800";
+                      const locations = findLocations(f.message ?? "", item.bodyMd);
+                      return (
+                        <li key={idx} className="text-xs">
+                          <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium mr-2 ${sevBg}`}>
+                            {sev}
+                          </span>
+                          <span className="text-gray-500">[{f.area}]</span> {f.message}
                           {locations.length > 0 && (
                             <span className="ml-2 text-red-700">
                               · found at line{locations.length > 1 ? "s" : ""} {locations.join(", ")}
@@ -247,7 +271,7 @@ export default async function ContentDetail({ params }: { params: { id: string }
                 </div>
               )}
 
-              {item.reviewNotes && !showFindings && (
+              {item.reviewNotes && criticIssues.length === 0 && layoutFindings.length === 0 && (
                 <div className="card mb-4 bg-orange-50 border-orange-200 text-sm whitespace-pre-wrap">
                   <div className="font-medium mb-1 text-orange-900">Review notes</div>
                   {item.reviewNotes}

@@ -390,6 +390,39 @@ function validateOutlineStructure(o: BlogOutline): string[] {
   if (o.ctaMidArticle?.afterSectionIdx !== 3) issues.push(`ctaMidArticle.afterSectionIdx must be 3`);
   if (!o.ctaPreFaq?.title || !o.ctaPreFaq?.href) issues.push(`ctaPreFaq.title and .href required`);
   if (!o.primaryServiceSlug) issues.push(`primaryServiceSlug required`);
+
+  // 2026 SEO metadata spec — same one-shot retry treatment as structural counts.
+  if (o.slug) {
+    const slugWordCount = o.slug.split("-").filter(Boolean).length;
+    if (slugWordCount < 3 || slugWordCount > 5) {
+      issues.push(`slug must be 3-5 hyphen-separated words, got ${slugWordCount} ("${o.slug}")`);
+    }
+    if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(o.slug)) {
+      issues.push(`slug must be lowercase ASCII with hyphens only, got "${o.slug}"`);
+    }
+  } else {
+    issues.push(`slug required`);
+  }
+  if (o.metaTitle) {
+    const len = o.metaTitle.length;
+    if (len < 50 || len > 60) issues.push(`metaTitle must be 50-60 chars, got ${len}`);
+  } else {
+    issues.push(`metaTitle required`);
+  }
+  if (o.metaDescription) {
+    const len = o.metaDescription.length;
+    if (len < 120 || len > 160) issues.push(`metaDescription must be 120-160 chars, got ${len}`);
+  } else {
+    issues.push(`metaDescription required`);
+  }
+  if (!o.focusKeyword || o.focusKeyword.trim().split(/\s+/).length > 5) {
+    issues.push(`focusKeyword must be a 2-5 word noun phrase`);
+  }
+  const kwCount = o.keywords?.length ?? 0;
+  if (kwCount < 3 || kwCount > 10) {
+    issues.push(`keywords must be 3-10 semantic variants, got ${kwCount}`);
+  }
+
   return issues;
 }
 

@@ -2,8 +2,22 @@ import slugify from "slugify";
 import { createHash } from "node:crypto";
 import { prisma, Prompts, queue, QUEUES, logger, type Business, type BrandKit, type ContentItem, type Prisma } from "@ca/shared";
 
+// Defensive slug builder. Even when Claude returns a tighter slug, we
+// normalize + strip filler words + cap at 5 hyphen-separated words per
+// the 2026 SEO spec (3-5 words, keyword-dense, no fluff).
+const SLUG_FILLER = new Set([
+  "the","a","an","and","or","for","of","in","on","at","to","with","by","from",
+  "is","are","be","this","that","these","those","your","our","you","we",
+  "guide","tips","tricks","best","how","what","why","when","where",
+]);
+
 export function makeSlug(s: string): string {
-  return slugify(s, { lower: true, strict: true, trim: true }).slice(0, 60);
+  const base = slugify(s, { lower: true, strict: true, trim: true });
+  const parts = base.split("-").filter(Boolean);
+  // Strip filler words, but never empty out the slug — keep originals if filtering ate everything.
+  const meaningful = parts.filter((p) => !SLUG_FILLER.has(p));
+  const picked = (meaningful.length >= 2 ? meaningful : parts).slice(0, 5);
+  return picked.join("-").slice(0, 60);
 }
 
 export function dedupeHash(title: string): string {

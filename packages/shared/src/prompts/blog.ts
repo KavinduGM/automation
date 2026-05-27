@@ -19,13 +19,13 @@ The brand block tells you the available services. Each blog must pick ONE primar
 
 Output JSON only, matching exactly this schema:
 {
-  "title":            string,        // H1 — clear, click-worthy, <= 70 chars, includes focusKeyword
-  "slug":             string,        // kebab-case, <= 60 chars, includes focusKeyword
-  "metaTitle":        string,        // <title> tag — <= 60 chars, includes focusKeyword
-  "metaDescription":  string,        // <= 155 chars, includes focusKeyword once, action-oriented
+  "title":            string,        // H1 — click-worthy, descriptive, <= 70 chars; includes focusKeyword
+  "slug":             string,        // SEE 2026 SEO SPEC BELOW — 3-5 keyword-dense words, lowercase, hyphens
+  "metaTitle":        string,        // SEE 2026 SEO SPEC BELOW — 50-60 chars, front-loaded keyword
+  "metaDescription":  string,        // SEE 2026 SEO SPEC BELOW — 120-160 chars, value-framed for CTR + AI Overviews
   "excerpt":          string,        // 1-2 sentences for cards + OG fallback
-  "focusKeyword":     string,        // primary SEO target
-  "keywords":         string[],      // 6-12 supporting LSI keywords
+  "focusKeyword":     string,        // ONE primary SEO target (a noun phrase, not a sentence)
+  "keywords":         string[],      // 3-10 semantic-variant secondary keywords (NOT exact-repeat stuffing)
   "tags":             string[],      // 3-6 site-level tags
 
   "primaryServiceSlug": string,      // REQUIRED — pick one slug from brand_site.services
@@ -98,12 +98,39 @@ STRUCTURAL CONTRACT — these counts are validated by the pipeline; returning th
 - faq.length === 5
 
 Other rules:
-- focusKeyword in: title, slug, metaTitle, metaDescription, H1 first paragraph, AND 2+ section H2s.
-- metaTitle differs from title (search-facing vs on-page).
+- focusKeyword (or a clear semantic variant) in: title, H1 first paragraph, AND 2+ section H2s.
+- metaTitle differs from title (search-facing vs on-page) — H1 can/should be longer and more descriptive.
+- metaDescription should use semantic variants of focusKeyword, NOT exact repeats (variation > stuffing).
 - Image prompts describe ONE subject clearly; no text overlays; no signs/labels in the image.
 - externalCitations name credible sources by NAME only — never invent URLs or stats.
 - The brand name MUST be mentioned by name in metaDescription OR excerpt at least once.
-- FAQ questions mirror real "people also ask" phrasing (start with How/What/Why/When/Should).`;
+- FAQ questions mirror real "people also ask" phrasing (start with How/What/Why/When/Should).
+
+# 2026 SEO METADATA SPEC (hard requirements — pipeline validates and retries if off-spec)
+
+slug:
+  - 3-5 words, separated by hyphens. NO filler words ("the", "in", "of", "with", "your", "guide").
+  - Lowercase only. ASCII letters + digits + hyphens. No trailing words like "-guide" / "-tips".
+  - Should be the keyword essence, not a sentence: "ml-model-integration" not "machine-learning-model-integration-web-apps".
+
+metaTitle:
+  - 50-60 characters TOTAL (count includes spaces). Aim for 55-58.
+  - Front-load the keyword: keyword in the FIRST 30 chars.
+  - Match search intent — write the way someone would Google it.
+  - Different from H1 by design (more compressed; H1 has room to be descriptive).
+
+metaDescription:
+  - 120-160 characters TOTAL (count includes spaces). Aim for 145-155.
+  - Lead with the value/outcome, not the keyword. Hook for human CTR AND AI Overview pull-quotes.
+  - Include a verb-form variant of the focusKeyword once, naturally. Do not exact-repeat.
+  - End with implicit CTA ("see how", "what works", "here's why") — no salesy CTAs like "click here".
+
+focusKeyword + keywords:
+  - focusKeyword is ONE noun phrase. 2-5 words. The exact thing you want to rank for.
+  - keywords array: 3-10 SEMANTIC VARIANTS and related entities (synonyms, plurals, intent variants).
+    Examples for focusKeyword "ml model integration":
+       ["machine learning deployment", "model serving in production", "production AI integration", ...]
+    NEVER pad with exact-match variations of the focus phrase.`;
 
 export function blogOutlineUser(
   topic: string,
