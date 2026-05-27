@@ -18,6 +18,19 @@ export interface BlogOutline {
   tags: string[];
   primaryServiceSlug: string;
   authorMode: "founder" | "team";
+  // The narrative archetype the article is written in. Drives framing,
+  // not structure (all archetypes use the same 6-section spine). The
+  // rotation logic in daily_brief surfaces which archetypes haven't
+  // been used lately so Claude can spread variety across the catalog.
+  articleType:
+    | "problem_solving"   // "Why X breaks in production and how to fix it"
+    | "tutorial"           // "How to build/integrate Y" — step-by-step
+    | "industry_analysis"  // "The state of Z in 2026"
+    | "comparison"         // "X vs Y: which fits your stack"
+    | "mistake_driven"     // "10 mistakes we see in X"
+    | "behind_the_scenes"  // "Our approach to W (with examples)"
+    | "trend_analysis"     // "What's changing in T right now"
+    | "guide";             // "Complete reference guide to V"
   // Short question/hook headline rendered on the brand cover image.
   // 4-7 words. Cover composition truncates anything longer, so the full
   // article title was getting cropped on display ("SCALABLE WEB" → "ICALABLE WEB").
@@ -818,6 +831,15 @@ function validateOutlineStructure(o: BlogOutline): string[] {
   const coverWordCount = (o.coverHeadline ?? "").trim().split(/\s+/).filter(Boolean).length;
   if (coverWordCount < 3 || coverWordCount > 8) {
     issues.push(`coverHeadline must be 4-7 words (a punchy question/hook), got ${coverWordCount} ("${o.coverHeadline ?? ""}")`);
+  }
+
+  // Article archetype must be one of the supported types.
+  const VALID_TYPES = [
+    "problem_solving","tutorial","industry_analysis","comparison",
+    "mistake_driven","behind_the_scenes","trend_analysis","guide",
+  ];
+  if (!o.articleType || !VALID_TYPES.includes(o.articleType)) {
+    issues.push(`articleType must be one of: ${VALID_TYPES.join(", ")} (got "${o.articleType ?? "missing"}")`);
   }
 
   return issues;

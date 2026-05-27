@@ -456,9 +456,20 @@ export default async function BusinessDetail({
                 <textarea
                   className="input font-mono text-xs"
                   name="config"
-                  rows={3}
-                  defaultValue={editingTopic ? JSON.stringify(editingTopic.config, null, 2) : `{ "subreddits": ["SaaS"], "time": "day" }`}
+                  rows={4}
+                  defaultValue={editingTopic ? JSON.stringify(editingTopic.config, null, 2) : `{
+  "industry": "B2B SaaS web development & AI automation",
+  "audience": "tech founders and product engineering teams",
+  "topicsPerDay": null,
+  "extraGuidance": "Cover ALL service categories over time, not just AI. Favor problem-solving and tutorial archetypes."
+}`}
                 />
+                <div className="mt-1 text-xs text-gray-500 space-y-0.5">
+                  <div><b>daily_brief</b> (recommended): industry, audience, topicsPerDay (null = use blog quota), extraGuidance — all optional. Now rotates across all services + 8 article archetypes automatically.</div>
+                  <div><b>reddit</b>: <code>{`{ "subreddits": ["SaaS","marketing"], "time": "day" }`}</code></div>
+                  <div><b>grok_x</b>: <code>{`{ "query": "trending B2B SaaS topics on X in the last 24h" }`}</code></div>
+                  <div><b>claude_seed</b>: <code>{`{ "brief": "evergreen topics this brand should cover" }`}</code></div>
+                </div>
               </div>
               {editingTopic && (
                 <label className="text-xs flex items-center gap-2">

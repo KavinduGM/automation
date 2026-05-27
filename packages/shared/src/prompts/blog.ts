@@ -34,6 +34,9 @@ Output JSON only, matching exactly this schema:
 
   "authorMode": "founder" | "team",  // founder for opinion/strategy; team for engineering/how-to
 
+  "articleType":   string,           // ONE of: problem_solving | tutorial | industry_analysis | comparison | mistake_driven | behind_the_scenes | trend_analysis | guide
+                                     // Frames the article — see ARTICLE ARCHETYPES below.
+
   "coverHeadline":  string,          // 4-7 word hook for the cover image, IDEALLY a question.
                                      // Examples: "READY TO DEPLOY ML MODELS?", "STRUGGLING WITH B2B SCALE?"
                                      // This is what shows on the cover — NOT the full title. The brand
@@ -157,7 +160,54 @@ focusKeyword + keywords:
   - keywords array: 3-10 SEMANTIC VARIANTS and related entities (synonyms, plurals, intent variants).
     Examples for focusKeyword "ml model integration":
        ["machine learning deployment", "model serving in production", "production AI integration", ...]
-    NEVER pad with exact-match variations of the focus phrase.`;
+    NEVER pad with exact-match variations of the focus phrase.
+
+# ARTICLE ARCHETYPES — pick the one that fits the topic, and FRAME the article in that voice
+
+Every blog uses the same 6-section spine, but the FRAMING differs sharply. Pick the
+articleType that matches the topic's natural angle. If the topic candidate already
+specifies an articleType, honor it.
+
+  problem_solving   — Hook = a real pain ("X breaks in production"). Sections diagnose
+                      root causes, then prescribe fixes. CTA leans toward "audit your
+                      setup". Best for: production failures, integration headaches,
+                      "why is my X slow" topics.
+
+  tutorial           — Hook = "Here's how to ship Y today". Sections become numbered
+                      steps. Concrete code-snippet-style detail. CTA = "let us
+                      implement this for you". Best for: integration tutorials, setup
+                      guides, getting-started topics.
+
+  industry_analysis  — Hook = "Here's what's actually happening in Z". Sections are
+                      forces, signals, players, predictions. Cite real names + events.
+                      CTA = "talk to us about your strategy". Best for: market shifts,
+                      annual state-of-X posts.
+
+  comparison         — Hook = "X vs Y: which fits". Sections compare on specific axes
+                      (cost, lock-in, scaling, support). Include a clear decision
+                      framework at the end. CTA = "not sure which? we'll scope it".
+                      Best for: tool/framework choices.
+
+  mistake_driven     — Hook = "Here are the N mistakes that sink Y". Each section is
+                      one mistake + the fix. Concrete, opinionated. CTA = "audit
+                      yours". Best for: anti-pattern posts, common-pitfall posts.
+
+  behind_the_scenes  — Hook = "Here's how WE build/run W". First-person, specific to
+                      the brand's process. Tools, decisions, trade-offs. CTA = "want
+                      this for your project? let's talk". Best for: process posts,
+                      methodology breakdowns.
+
+  trend_analysis     — Hook = "What changed in T this quarter and why it matters".
+                      Tie to recent events (use research context if provided). CTA
+                      = "stay ahead by working with us". Best for: news-reactive
+                      evergreens, predictions.
+
+  guide              — Hook = "The complete reference for V". Sections are
+                      definitive sub-topics. Reads like a long-form reference doc.
+                      CTA = "ready to implement? we'll do it for you". Best for:
+                      reference articles, encyclopedic deep dives.
+
+Across a batch of articles, vary archetypes — don't propose 3 tutorials in a row.`;
 
 export function blogOutlineUser(
   topic: string,

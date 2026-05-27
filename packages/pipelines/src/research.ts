@@ -1,6 +1,19 @@
-import { prisma, logger, type Prisma } from "@ca/shared";
+import { prisma, brandSiteFor, logger, type Prisma } from "@ca/shared";
 import { topPosts, grokTrends, grokBatchedBriefs, claude } from "@ca/providers";
 import { dedupeHash } from "./util.js";
+
+// Article archetypes — must match the BlogOutline.articleType enum.
+// Pinned here so the daily_brief rotation logic can pass them through.
+const ARTICLE_ARCHETYPES = [
+  "problem_solving",
+  "tutorial",
+  "industry_analysis",
+  "comparison",
+  "mistake_driven",
+  "behind_the_scenes",
+  "trend_analysis",
+  "guide",
+] as const;
 
 // Pulls topic candidates from configured sources for one business and writes
 // them to topic_candidates. Idempotent thanks to dedupeHash.
@@ -116,23 +129,78 @@ async function runDailyBrief(
   const n = Math.min(10, Math.max(1, cfg.topicsPerDay ?? planQuota));
 
   const kit = await prisma.brandKit.findUnique({ where: { businessId } });
+  const business = await prisma.business.findUnique({ where: { id: businessId } });
+  const brand = business ? brandSiteFor(business.slug) : null;
+
+  // Rotation context — what's been over-covered lately so Claude can
+  // spread proposals across less-touched services + article archetypes.
+  // This is THE fix for the "all articles are about ML/AI integration"
+  // problem: without it, Claude keeps proposing topics in the same
+  // narrow groove because nothing tells it the catalog is wider.
+  const rotation = await getRotationContext(businessId);
+  const allServiceSlugs = brand?.services.map((s) => `${s.slug} (${s.title})`) ?? [];
+  const underusedServices = (brand?.services ?? [])
+    .filter((s) => (rotation.serviceCoverage.get(s.slug) ?? 0) < 2)
+    .map((s) => `${s.slug} (${s.title}, category: ${s.category})`);
+  const overusedServices = [...rotation.serviceCoverage.entries()]
+    .filter(([, n]) => n >= 2)
+    .sort(([, a], [, b]) => b - a)
+    .map(([slug, n]) => `${slug} (${n}×)`);
+  const underusedArchetypes = ARTICLE_ARCHETYPES.filter((a) => !rotation.recentArchetypes.includes(a));
 
   // Step 1 — Claude proposes N brand-aligned topics, each tagged for sensitivity.
   const proposalSystem =
-    `Propose ${n} distinct blog topics for the brand below. For each topic, tag its sensitivity:
-- "evergreen" — content that stays relevant for months (best practices, how-tos, frameworks).
-- "time_sensitive" — depends on recent context but won't expire same-day (industry shifts, quarterly trends).
-- "breaking" — news-reactive; loses value within 48h (acquisitions, product launches, viral events).
+    `Propose ${n} distinct blog topics for the brand below. Each topic must:
+- Center on ONE service from the brand's catalog (provide the slug as serviceSlug).
+- Use a specific article archetype (problem_solving | tutorial | industry_analysis | comparison | mistake_driven | behind_the_scenes | trend_analysis | guide).
+- Tag sensitivity: "evergreen" | "time_sensitive" | "breaking".
 
-Output JSON only: { topics: [{ title: string, sensitivity: "evergreen"|"time_sensitive"|"breaking", whyNow?: string }] }`;
+ROTATION RULES (read carefully — these are the difference between a varied content calendar and a one-note blog):
+
+1. SERVICES: Prefer UNDERUSED services from the rotation context. The brand has many services; don't just propose topics for the same 2-3 every cycle. Pull from the underusedServices list first. If you must repeat a service, it must be unique within THIS batch.
+
+2. ARCHETYPES: Vary archetypes within the batch. Don't propose 3 tutorials in a row. Prefer archetypes from underusedArchetypes. Reasonable batch mix examples:
+   - [problem_solving, tutorial, comparison]
+   - [behind_the_scenes, mistake_driven, industry_analysis]
+   - [guide, trend_analysis, problem_solving]
+
+3. SENSITIVITY: Mix freely — at least one evergreen is preferred per batch.
+
+4. ANGLES: Lean into PROBLEM-SOLVING and TUTORIAL content (those rank best in search). For service-focused articles, the angle should be the customer's PAIN, not the brand's offering. Bad: "Our AI Chatbot Service". Good: "Why your support team drowns in tier-1 tickets and how an AI tier-0 layer fixes it" → leads naturally to ai-chatbot service.
+
+Output JSON only:
+{
+  "topics": [{
+    "title": string,
+    "serviceSlug": string,        // MUST be from the brand's services list
+    "articleType": string,        // ONE of the 8 archetypes
+    "sensitivity": "evergreen" | "time_sensitive" | "breaking",
+    "whyNow"?: string             // 1 sentence on why this is interesting now
+  }]
+}`;
   const proposalUser = JSON.stringify({
     industry: cfg.industry ?? "general B2B",
     audience: cfg.audience ?? "professional readers",
     brand: kit ? { icp: kit.icp, usps: kit.usps, voice: kit.voice } : null,
+    services: allServiceSlugs,
+    rotationContext: {
+      underusedServices,
+      overusedServicesLast30Days: overusedServices,
+      underusedArchetypes,
+      recentArchetypes: rotation.recentArchetypes,
+    },
     extraGuidance: cfg.extraGuidance ?? null,
   });
 
-  type Proposal = { topics: Array<{ title: string; sensitivity?: string; whyNow?: string }> };
+  type Proposal = {
+    topics: Array<{
+      title: string;
+      sensitivity?: string;
+      whyNow?: string;
+      serviceSlug?: string;
+      articleType?: string;
+    }>;
+  };
   let proposal: Proposal["topics"] = [];
   try {
     const res = await claude<Proposal>({
@@ -178,10 +246,19 @@ Output JSON only: { topics: [{ title: string, sensitivity: "evergreen"|"time_sen
     const sensitivity = (p.sensitivity === "evergreen" || p.sensitivity === "time_sensitive" || p.sensitivity === "breaking")
       ? p.sensitivity
       : "evergreen";
+    // Validate articleType against the known set; default to problem_solving
+    // (best-ranking archetype) if Claude omitted or invented one.
+    const articleType = (ARTICLE_ARCHETYPES as readonly string[]).includes(p.articleType ?? "")
+      ? p.articleType
+      : "problem_solving";
+    // Validate serviceSlug against the brand catalog; null if invalid.
+    const serviceSlug = brand?.services.find((s) => s.slug === p.serviceSlug)?.slug ?? null;
     const raw = {
       whyNow: p.whyNow ?? null,
       grokBrief: brief ?? null,
       enriched: !!brief,
+      articleType,
+      serviceSlug,
     };
     const created = await prisma.topicCandidate.upsert({
       where: { businessId_dedupeHash: { businessId, dedupeHash: hash } },
@@ -235,4 +312,40 @@ async function scoreNewCandidates(businessId: string) {
   } catch (err) {
     logger.warn({ err, businessId }, "research.scoring_skipped");
   }
+}
+
+// Build the rotation context used by daily_brief topic proposal.
+//   - serviceCoverage:  map of primaryServiceSlug → count over last 30 days
+//   - recentArchetypes: list of articleTypes used in the LAST 5 articles
+//                      (so Claude knows which archetypes to lean away from)
+//
+// Without this, Claude keeps proposing topics in whatever narrow groove
+// it landed in last time, and every article ends up about the same
+// 2-3 services in the same archetype style.
+async function getRotationContext(businessId: string): Promise<{
+  serviceCoverage: Map<string, number>;
+  recentArchetypes: string[];
+}> {
+  const SINCE_DAYS = 30;
+  const since = new Date(Date.now() - SINCE_DAYS * 24 * 60 * 60 * 1000);
+  const recent = await prisma.contentItem.findMany({
+    where: { businessId, type: "blog", createdAt: { gte: since } },
+    orderBy: { createdAt: "desc" },
+    take: 30,
+    select: { meta: true },
+  });
+  const serviceCoverage = new Map<string, number>();
+  const recentArchetypes: string[] = [];
+  for (const [i, it] of recent.entries()) {
+    const meta = (it.meta ?? {}) as {
+      outline?: { primaryServiceSlug?: string; articleType?: string };
+    };
+    const slug = meta.outline?.primaryServiceSlug;
+    if (slug) serviceCoverage.set(slug, (serviceCoverage.get(slug) ?? 0) + 1);
+    if (i < 5) {
+      const t = meta.outline?.articleType;
+      if (t) recentArchetypes.push(t);
+    }
+  }
+  return { serviceCoverage, recentArchetypes };
 }
