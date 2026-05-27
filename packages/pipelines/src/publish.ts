@@ -68,7 +68,12 @@ export async function publishContentItem(contentItemId: string): Promise<void> {
         await queue(QUEUES.post_review).add(
           `review:${contentItemId}`,
           { contentItemId, publicUrl, attempt: 0 },
-          { delay: 180_000, removeOnComplete: 500, removeOnFail: 100 },
+          // 60s margin: revalidateForContent already flushed the ISR cache
+          // synchronously on publish, so the page should be live almost
+          // immediately. 60s covers the first request to materialize +
+          // any modest network variance. Was 180s but most of that was
+          // unnecessary padding.
+          { delay: 60_000, removeOnComplete: 500, removeOnFail: 100 },
         );
         logger.info({ contentItemId, publicUrl }, "publish.post_review_enqueued");
       } catch (err) {

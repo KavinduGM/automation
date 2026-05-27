@@ -63,8 +63,8 @@ export interface ReviewReport {
   attempt: number;
 }
 
-const MAX_HTTP_RETRIES = 2;       // 2 retries × 90s delay each = up to 3 minutes of extra wait
-const RETRY_DELAY_MS   = 90_000;
+const MAX_HTTP_RETRIES = 2;       // 2 retries × 45s delay each = up to 90s of extra wait
+const RETRY_DELAY_MS   = 45_000;
 
 export async function runPostReview(data: PostReviewJobData): Promise<ReviewReport | { rescheduled: true }> {
   const findings: ReviewFinding[] = [];
