@@ -451,6 +451,7 @@ model Post {
   readingMinutes  Int?
   canonicalPath   String?
   authorName      String?
+  authorRole      String?
   authorUrl       String?
 
   @@unique([businessId, slug])
@@ -482,6 +483,7 @@ model CaseStudy {
   readingMinutes  Int?
   canonicalPath   String?
   authorName      String?
+  authorRole      String?
   authorUrl       String?
 
   @@unique([businessId, slug])
@@ -513,6 +515,7 @@ model Resource {
   readingMinutes  Int?
   canonicalPath   String?
   authorName      String?
+  authorRole      String?
   authorUrl       String?
 
   @@unique([businessId, slug])

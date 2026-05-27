@@ -18,6 +18,11 @@ export interface BlogOutline {
   tags: string[];
   primaryServiceSlug: string;
   authorMode: "founder" | "team";
+  // Short question/hook headline rendered on the brand cover image.
+  // 4-7 words. Cover composition truncates anything longer, so the full
+  // article title was getting cropped on display ("SCALABLE WEB" → "ICALABLE WEB").
+  // Examples: "READY TO DEPLOY ML MODELS?", "STRUGGLING WITH B2B SCALE?"
+  coverHeadline: string;
   sections: Array<{ h2: string; bullets: string[] }>;
   imagePrompts: Array<{
     prompt: string;                       // body images: full image prompt; hero: short subject hint (e.g. "a CRM analytics dashboard")
@@ -33,18 +38,53 @@ export interface BlogOutline {
   faq: Array<{ q: string; a: string }>;
 }
 
-// Site-level author config keyed by business slug. For now hardcoded for
-// the only business onboarded; move to brand-catalog or DB later.
-const AUTHORS_BY_BUSINESS: Record<string, { founder: { name: string; url: string }; team: { name: string; url: string } }> = {
+// Site-level author roster keyed by business slug. The outline picks
+// authorMode (founder vs team); for "team" articles we deterministically
+// round-robin among the listed team members so the byline isn't always
+// the same person. Deterministic so the same contentItemId always picks
+// the same author (useful for re-publishes and tests).
+//
+// For now hardcoded; move to brand-catalog or BrandKit JSON later.
+interface AuthorEntry {
+  name: string;
+  role: string;
+  url: string;
+}
+interface AuthorRoster {
+  founder: AuthorEntry;
+  team: AuthorEntry[];
+}
+const AUTHORS_BY_BUSINESS: Record<string, AuthorRoster> = {
   "groovymark-webx": {
-    founder: { name: "Kavindu Gamlath", url: "https://webx.groovymark.com/about" },
-    team:    { name: "WebX Engineering Team", url: "https://webx.groovymark.com/about" },
+    founder: { name: "Kavindu Gamlath", role: "Founder & CEO", url: "https://webx.groovymark.com/about" },
+    team: [
+      { name: "Rangaa Cooray", role: "CTO & Senior Software Engineer", url: "https://webx.groovymark.com/about" },
+      { name: "Elijah",        role: "Senior AI Systems Engineer",     url: "https://webx.groovymark.com/about" },
+      { name: "Amanda",        role: "Full Stack Developer",           url: "https://webx.groovymark.com/about" },
+      { name: "Vishwa",        role: "Senior Full Stack Developer",    url: "https://webx.groovymark.com/about" },
+    ],
   },
 };
-const DEFAULT_AUTHORS = {
-  founder: { name: "Editorial Team", url: "" },
-  team:    { name: "Editorial Team", url: "" },
+const DEFAULT_AUTHORS: AuthorRoster = {
+  founder: { name: "Editorial Team", role: "", url: "" },
+  team:    [{ name: "Editorial Team", role: "", url: "" }],
 };
+
+// Pick the right byline. Founder articles always go to the named
+// founder; team articles round-robin by a simple hash of the
+// contentItemId so the same item always re-picks the same person but
+// across a batch of articles the roster spreads evenly.
+function pickAuthor(roster: AuthorRoster, mode: "founder" | "team", contentItemId: string): AuthorEntry {
+  if (mode === "founder") return roster.founder;
+  const team = roster.team.length > 0 ? roster.team : [roster.founder];
+  // Stable hash of the id → integer index.
+  let hash = 0;
+  for (let i = 0; i < contentItemId.length; i += 1) {
+    hash = ((hash << 5) - hash + contentItemId.charCodeAt(i)) | 0;
+  }
+  const idx = Math.abs(hash) % team.length;
+  return team[idx]!;
+}
 
 export async function runBlogPipeline(contentItemId: string): Promise<void> {
   const item = await prisma.contentItem.findUniqueOrThrow({ where: { id: contentItemId } });
@@ -191,8 +231,8 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
   });
   outline = outlineRes.json;
   const slug = makeSlug(outline.slug || outline.title);
-  const authors = AUTHORS_BY_BUSINESS[business.slug] ?? DEFAULT_AUTHORS;
-  const author = authors[outline.authorMode] ?? authors.team;
+  const roster = AUTHORS_BY_BUSINESS[business.slug] ?? DEFAULT_AUTHORS;
+  const author = pickAuthor(roster, outline.authorMode, contentItemId);
 
   const seo: SeoBundle = {
     metaTitle: outline.metaTitle ?? null,
@@ -216,6 +256,7 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
         excerpt: outline.excerpt,
         tags: outline.tags,
         authorName: author.name,
+        authorRole: author.role,
         authorUrl: author.url,
         seo: seo as unknown as Prisma.InputJsonValue,
         faq: outline.faq as unknown as Prisma.InputJsonValue,
@@ -283,7 +324,7 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
       "blog.skipping_images_text_only_fix",
     );
   } else {
-    await runImageGeneration(contentItemId, business.id, business.slug, slug, outline.imagePrompts ?? [], outline.title);
+    await runImageGeneration(contentItemId, business.id, business.slug, slug, outline.imagePrompts ?? [], outline.title, outline.coverHeadline);
   }
 
   // 5. Self-critique → route
@@ -470,6 +511,7 @@ async function regenImagesOnly(
       slug,
       savedOutline.imagePrompts,
       savedOutline.title,
+      savedOutline.coverHeadline,
       failedOrds,
     );
     return;
@@ -477,32 +519,40 @@ async function regenImagesOnly(
 
   // Full image regen — no per-image error info, wipe all and try fresh.
   await prisma.asset.deleteMany({ where: { contentItemId, kind: "image" } });
-  await runImageGeneration(contentItemId, business.id, business.slug, slug, savedOutline.imagePrompts, savedOutline.title);
+  await runImageGeneration(contentItemId, business.id, business.slug, slug, savedOutline.imagePrompts, savedOutline.title, savedOutline.coverHeadline);
 }
 
 // Build the brand-templated cover image prompt. Every cover image in the
 // brand's catalog uses the same composition so articles look like a
 // series, not a stock-photo collage. The article-specific piece is the
 // "subject hint" (what's on the device screen) supplied by the outline.
+//
+// Composition is INSET to the center 70% of the frame so client sites
+// displaying the 3:2 source in a 16:9 frame don't truncate the headline
+// (we saw "SCALABLE WEB" get cropped to "ICALABLE WEB" in the live page).
 function buildBrandCoverPrompt(
   style: NonNullable<ReturnType<typeof brandSiteFor>>["coverImageStyle"],
-  articleTitle: string,
+  fallbackTitle: string,
   coverSubject: string,
+  coverHeadline?: string,
 ): string {
-  if (!style) return `${coverSubject}. ${articleTitle}.`;
-  const headline = articleTitle.toUpperCase();
-  // Short-form line list keeps the prompt token-efficient.
+  if (!style) return `${coverSubject}. ${fallbackTitle}.`;
+  // Prefer the short hook headline; fall back to the article title if outline
+  // didn't supply one. Always upper-case for visual weight.
+  const raw = (coverHeadline ?? fallbackTitle).trim();
+  const headline = raw.toUpperCase();
   return [
     `Create a 16:9 brand cover image — wide horizontal composition.`,
     `Background: clean studio surface in ${style.backgroundColor}.`,
     `Accent color: ${style.themeColor} — used ONLY for the headline typography and a small badge.`,
-    `Right side of the frame: ${style.deviceHint}, screen visible and in focus.`,
+    `IMPORTANT — Safe zone: all text, the device, and the badge MUST stay within the CENTER 70% of the frame. The outer 15% on each side and 10% top/bottom must be empty studio background. This prevents any text or content from being cropped when the image is displayed at different aspect ratios.`,
+    `Right side of the frame (inside the safe zone): ${style.deviceHint}, screen visible and in focus.`,
     `The device screen displays: ${coverSubject}.`,
-    `Left side of the frame: vertical text block —`,
-    `  Headline (large, bold, color ${style.themeColor}): "${headline}"`,
+    `Left side of the frame (inside the safe zone): vertical text block —`,
+    `  Headline (large, bold, color ${style.themeColor}, MUST FIT on 2-3 lines): "${headline}"`,
     `  Below the headline, a small rounded pill badge — background ${style.themeColor}, text white — saying "Blog".`,
     style.extraStyleHints ? `Style: ${style.extraStyleHints}.` : "",
-    `Rendering rules: the headline text must be clearly legible and exactly as written. No extra background text, no watermarks, no AI artefacts, no garbled glyphs.`,
+    `Rendering rules: the headline text must be clearly legible and exactly as written. No extra background text, no watermarks, no AI artefacts, no garbled glyphs. Keep everything well within the safe zone.`,
   ]
     .filter(Boolean)
     .join("\n");
@@ -548,6 +598,7 @@ async function runImageGeneration(
   slug: string,
   imagePrompts: BlogOutline["imagePrompts"],
   articleTitle: string,
+  coverHeadline: string | undefined,
   onlyOrds?: number[],
 ): Promise<void> {
   await setStatus(contentItemId, "generating_media");
@@ -565,7 +616,7 @@ async function runImageGeneration(
     let finalPrompt: string;
     if (isHero) {
       finalPrompt = brand?.coverImageStyle
-        ? buildBrandCoverPrompt(brand.coverImageStyle, articleTitle, ip.prompt)
+        ? buildBrandCoverPrompt(brand.coverImageStyle, articleTitle, ip.prompt, coverHeadline)
         : ip.prompt;
     } else {
       finalPrompt = augmentBodyPrompt(ip.prompt, ip.style ?? "photo", brand?.coverImageStyle?.themeColor);
@@ -761,6 +812,12 @@ function validateOutlineStructure(o: BlogOutline): string[] {
   const kwCount = o.keywords?.length ?? 0;
   if (kwCount < 3 || kwCount > 10) {
     issues.push(`keywords must be 3-10 semantic variants, got ${kwCount}`);
+  }
+
+  // Cover headline: 4-7 words, anything longer gets cropped on the live page.
+  const coverWordCount = (o.coverHeadline ?? "").trim().split(/\s+/).filter(Boolean).length;
+  if (coverWordCount < 3 || coverWordCount > 8) {
+    issues.push(`coverHeadline must be 4-7 words (a punchy question/hook), got ${coverWordCount} ("${o.coverHeadline ?? ""}")`);
   }
 
   return issues;

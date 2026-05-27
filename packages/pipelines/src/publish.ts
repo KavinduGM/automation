@@ -121,14 +121,16 @@ function inlineImagesFor(item: Item): Array<{ path: string; alt: string | null; 
     .map((a) => ({ path: a.path, alt: a.altText, ord: a.ord }));
 }
 
-// Remove any [[IMAGE_N]] marker whose `ord` isn't backed by an actual Asset
-// row. This is the safety net for partial image-generation failures: we'd
-// rather show the article with a gap than leak a template token to the
-// live page (which the layout reviewer would then roll back). The marker
-// removal collapses any blank line it lived on so the body stays clean.
-function stripUnmatchedImageMarkers(body: string, availableOrds: Set<number>): string {
-  // Lines containing only an IMAGE marker get deleted entirely. Inline
-  // markers (rare but possible) get replaced with an empty string.
+// Process every [[IMAGE_N]] marker:
+//   - if the ord has a matching Asset, KEEP the marker AND inject the
+//     image's alt text as an italic markdown line below it. The italic
+//     line renders as a visible caption (good for readers + SEO).
+//   - if the ord has no matching Asset, DROP the marker entirely.
+//     Prevents marker_leak findings from the post-publish layout reviewer.
+function processImageMarkers(
+  body: string,
+  altByOrd: Map<number, string>,
+): string {
   const lines = body.split("\n");
   const out: string[] = [];
   for (const line of lines) {
@@ -136,8 +138,18 @@ function stripUnmatchedImageMarkers(body: string, availableOrds: Set<number>): s
     const soloMatch = /^\[\[IMAGE_(\d+)\]\]$/.exec(trimmed);
     if (soloMatch) {
       const ord = Number(soloMatch[1]);
-      if (availableOrds.has(ord)) {
+      if (altByOrd.has(ord)) {
         out.push(line);
+        const alt = (altByOrd.get(ord) ?? "").trim();
+        // Skip the caption for the hero (ord=0) — it's the cover image,
+        // not an in-article figure; client sites typically render the cover
+        // with its own layout (title overlay etc) and don't want a duplicate.
+        if (ord >= 1 && alt) {
+          out.push("");
+          // Italic markdown renders as a small caption on most blog
+          // renderers. Prefix with a thin space + asterisks for emphasis.
+          out.push(`*${alt}*`);
+        }
       }
       // else: drop the whole line.
       continue;
@@ -145,7 +157,7 @@ function stripUnmatchedImageMarkers(body: string, availableOrds: Set<number>): s
     // Inline (mid-line) markers — replace any unmatched ones in place.
     const cleaned = line.replace(/\[\[IMAGE_(\d+)\]\]/g, (m, ordStr) => {
       const ord = Number(ordStr);
-      return availableOrds.has(ord) ? m : "";
+      return altByOrd.has(ord) ? m : "";
     });
     out.push(cleaned);
   }
@@ -158,18 +170,22 @@ async function publishBlog(item: Item) {
     excerpt?: string;
     tags?: string[];
     authorName?: string;
+    authorRole?: string;
     authorUrl?: string;
     faq?: Array<{ q: string; a: string }>;
   };
   const cover = coverFor(item);
   const inline = inlineImagesFor(item);
-  // Scrub any [[IMAGE_N]] markers that don't have a matching asset.
-  // Happens when image generation partially failed (e.g. OpenAI credits)
-  // and the body still references images that were never written. Without
-  // this, the markers leak to live HTML and the layout reviewer rolls the
-  // page back for marker_leak.
-  const availableOrds = new Set(item.assets.filter((a) => a.kind === "image").map((a) => a.ord));
-  const safeBody = stripUnmatchedImageMarkers(item.bodyMd, availableOrds);
+  // Process [[IMAGE_N]] markers: keep ones backed by assets (and inject
+  // an italic alt-text caption beneath them), drop unmatched ones. The
+  // safety net for partial image-gen failures + the alt-as-caption is
+  // both reader-friendly and good for SEO.
+  const altByOrd = new Map<number, string>();
+  for (const a of item.assets) {
+    if (a.kind !== "image") continue;
+    altByOrd.set(a.ord, a.altText ?? "");
+  }
+  const safeBody = processImageMarkers(item.bodyMd, altByOrd);
   const seo = extractSeo(item);
   const seoFields = publishedSeo({
     seo,
@@ -177,6 +193,7 @@ async function publishBlog(item: Item) {
     body: safeBody,
     coverImagePath: cover.path,
     authorName: meta.authorName ?? null,
+    authorRole: meta.authorRole ?? null,
     authorUrl: meta.authorUrl ?? null,
     includeReadingMinutes: true,
   });
@@ -298,7 +315,7 @@ async function publishLandingPage(item: Item) {
     includeReadingMinutes: false,
   });
   if (!seoFields.ogImageAlt && cover.alt) seoFields.ogImageAlt = cover.alt;
-  const { readingMinutes: _r, authorName: _an, authorUrl: _au, ...lpSeoFields } = seoFields;
+  const { readingMinutes: _r, authorName: _an, authorRole: _ar, authorUrl: _au, ...lpSeoFields } = seoFields;
 
   await prisma.landingPage.upsert({
     where: { contentItemId: item.id },

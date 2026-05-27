@@ -34,6 +34,11 @@ Output JSON only, matching exactly this schema:
 
   "authorMode": "founder" | "team",  // founder for opinion/strategy; team for engineering/how-to
 
+  "coverHeadline":  string,          // 4-7 word hook for the cover image, IDEALLY a question.
+                                     // Examples: "READY TO DEPLOY ML MODELS?", "STRUGGLING WITH B2B SCALE?"
+                                     // This is what shows on the cover — NOT the full title. The brand
+                                     // template crops anything longer; keep it punchy.
+
   "sections": [
     { "h2": string, "bullets": string[] }
   ],                                 // EXACTLY 6 sections, in this fixed shape:

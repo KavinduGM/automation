@@ -60,6 +60,7 @@ export interface PublishedSeoFields {
   readingMinutes?: number | null;
   canonicalPath: string | null;
   authorName: string | null;
+  authorRole: string | null;
   authorUrl: string | null;
 }
 
@@ -69,6 +70,7 @@ export function publishedSeo(opts: {
   body?: string;
   coverImagePath?: string | null;
   authorName?: string | null;
+  authorRole?: string | null;
   authorUrl?: string | null;
   includeReadingMinutes?: boolean;
 }): PublishedSeoFields {
@@ -82,6 +84,7 @@ export function publishedSeo(opts: {
     readingMinutes: opts.includeReadingMinutes && opts.body ? readingMinutes(opts.body) : null,
     canonicalPath: null,
     authorName: opts.authorName ?? null,
+    authorRole: opts.authorRole ?? null,
     authorUrl: opts.authorUrl ?? null,
   };
 }
