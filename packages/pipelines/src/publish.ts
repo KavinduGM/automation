@@ -105,6 +105,38 @@ function inlineImagesFor(item: Item): Array<{ path: string; alt: string | null; 
     .map((a) => ({ path: a.path, alt: a.altText, ord: a.ord }));
 }
 
+// Remove any [[IMAGE_N]] marker whose `ord` isn't backed by an actual Asset
+// row. This is the safety net for partial image-generation failures: we'd
+// rather show the article with a gap than leak a template token to the
+// live page (which the layout reviewer would then roll back). The marker
+// removal collapses any blank line it lived on so the body stays clean.
+function stripUnmatchedImageMarkers(body: string, availableOrds: Set<number>): string {
+  // Lines containing only an IMAGE marker get deleted entirely. Inline
+  // markers (rare but possible) get replaced with an empty string.
+  const lines = body.split("\n");
+  const out: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const soloMatch = /^\[\[IMAGE_(\d+)\]\]$/.exec(trimmed);
+    if (soloMatch) {
+      const ord = Number(soloMatch[1]);
+      if (availableOrds.has(ord)) {
+        out.push(line);
+      }
+      // else: drop the whole line.
+      continue;
+    }
+    // Inline (mid-line) markers — replace any unmatched ones in place.
+    const cleaned = line.replace(/\[\[IMAGE_(\d+)\]\]/g, (m, ordStr) => {
+      const ord = Number(ordStr);
+      return availableOrds.has(ord) ? m : "";
+    });
+    out.push(cleaned);
+  }
+  // Collapse 3+ consecutive blank lines that may result from dropped markers.
+  return out.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+
 async function publishBlog(item: Item) {
   const meta = (item.meta ?? {}) as {
     excerpt?: string;
@@ -115,11 +147,18 @@ async function publishBlog(item: Item) {
   };
   const cover = coverFor(item);
   const inline = inlineImagesFor(item);
+  // Scrub any [[IMAGE_N]] markers that don't have a matching asset.
+  // Happens when image generation partially failed (e.g. OpenAI credits)
+  // and the body still references images that were never written. Without
+  // this, the markers leak to live HTML and the layout reviewer rolls the
+  // page back for marker_leak.
+  const availableOrds = new Set(item.assets.filter((a) => a.kind === "image").map((a) => a.ord));
+  const safeBody = stripUnmatchedImageMarkers(item.bodyMd, availableOrds);
   const seo = extractSeo(item);
   const seoFields = publishedSeo({
     seo,
     fallbackTitle: item.title,
-    body: item.bodyMd,
+    body: safeBody,
     coverImagePath: cover.path,
     authorName: meta.authorName ?? null,
     authorUrl: meta.authorUrl ?? null,
@@ -136,7 +175,7 @@ async function publishBlog(item: Item) {
       slug: item.slug ?? item.id,
       title: item.title,
       excerpt: seo.excerpt ?? meta.excerpt ?? "",
-      bodyMd: item.bodyMd,
+      bodyMd: safeBody,
       coverImagePath: cover.path,
       inlineImages: inline as unknown as Prisma.InputJsonValue,
       tags: meta.tags ?? [],
@@ -146,7 +185,7 @@ async function publishBlog(item: Item) {
     update: {
       title: item.title,
       excerpt: seo.excerpt ?? meta.excerpt ?? "",
-      bodyMd: item.bodyMd,
+      bodyMd: safeBody,
       coverImagePath: cover.path,
       inlineImages: inline as unknown as Prisma.InputJsonValue,
       tags: meta.tags ?? [],

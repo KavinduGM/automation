@@ -129,11 +129,17 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
   // before continuing — beyond that we accept what we got rather than
   // burning more tokens; the auto-review safety net will catch real breakage.
   let outline: BlogOutline;
+  // Outline is structural JSON, not creative writing — Haiku handles it
+  // well at ~25% the cost of Sonnet. The validator + one-shot retry
+  // catches anything off-spec.
+  // System prompt is cached so a worker drafting multiple articles per
+  // window only pays full price on the first call.
+  const outlineSystem = [{ text: Prompts.BLOG_OUTLINE_SYSTEM, cache: true }];
   let outlineRes = await claude<BlogOutline>({
-    model: "writing",
+    model: "routing",
     json: true,
     maxTokens: 4096,
-    system: Prompts.BLOG_OUTLINE_SYSTEM,
+    system: outlineSystem,
     user: Prompts.blogOutlineUser(topicTitle, brandBlock, servicesBlock, researchContext),
   });
   if (!outlineRes.json) throw new Error("blog: outline JSON missing");
@@ -143,10 +149,10 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
   if (issues.length > 0) {
     logger.warn({ contentItemId, issues }, "blog.outline_structure_off_spec_retrying");
     outlineRes = await claude<BlogOutline>({
-      model: "writing",
+      model: "routing",
       json: true,
       maxTokens: 4096,
-      system: Prompts.BLOG_OUTLINE_SYSTEM,
+      system: outlineSystem,
       user:
         Prompts.blogOutlineUser(topicTitle, brandBlock, servicesBlock, researchContext) +
         `\n\nYour previous attempt violated the structural contract:\n` +
@@ -203,10 +209,18 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
     ? buildCorrectionContext(totalFixAttempt, itemMeta.lastFindings)
     : "";
 
+  // Cache the stable BLOG_DRAFT_SYSTEM; keep the per-article correction
+  // context uncached since it's unique to each retry.
+  const draftSystem = correctionContext
+    ? [
+        { text: Prompts.BLOG_DRAFT_SYSTEM, cache: true },
+        { text: correctionContext, cache: false },
+      ]
+    : [{ text: Prompts.BLOG_DRAFT_SYSTEM, cache: true }];
   const draftRes = await claude<string>({
     model: "writing",
     maxTokens: 14000,
-    system: Prompts.BLOG_DRAFT_SYSTEM + correctionContext,
+    system: draftSystem,
     user: Prompts.blogDraftUser(outline, brandBlock, servicesBlock),
   });
   await bumpCost(contentItemId, draftRes.costUsd);
@@ -214,7 +228,7 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
   // Post-process: belt-and-suspenders strip of any em/en dashes Claude let
   // through. Substitute with comma+space which is almost always semantically
   // closest. (Trailing/leading whitespace handled.)
-  const cleanedBody = scrubDashes(draftRes.text);
+  const cleanedBody = scrubAiTells(scrubDashes(draftRes.text));
   await prisma.contentItem.update({
     where: { id: contentItemId },
     data: { bodyMd: cleanedBody },
@@ -293,7 +307,7 @@ async function regenSectionsOnly(
           `Rewrite to resolve every flagged issue. Return Markdown only.`,
       });
       await bumpCost(contentItemId, res.costUsd);
-      const rewritten = scrubDashes(res.text).trim();
+      const rewritten = scrubAiTells(scrubDashes(res.text)).trim();
       if (!rewritten || !rewritten.toLowerCase().startsWith("## ")) {
         logger.warn({ contentItemId, heading: sec.heading }, "blog.section_regen_returned_invalid");
         continue;
@@ -655,6 +669,75 @@ function scrubDashes(text: string): string {
     .replace(/,{2,}/g, ",")
     // collapse ", ." or ", :"
     .replace(/,\s*([.;:!?])/g, "$1");
+}
+
+// AI-tell scrubber. The draft prompt bans these but Claude slips them in
+// ~15-20% of the time, which sends the critic to "revise" and triggers a
+// wasted re-draft. Catching them with regex is free and catches >80% of
+// the problem before the critic ever sees the draft.
+//
+// Replacements aim for the most natural alternative; some phrases are
+// simply dropped (kept as empty string) because there's no clean swap.
+//   - "delve into <X>"          → "explore <X>"
+//   - "leverage"                 → "use"
+//   - "moreover" / "furthermore" → "Also" (sentence starts) or dropped
+//   - "navigating the landscape" → "working through the field"
+//   - "in today's fast-paced..." → ""  (just drop the throat-clear)
+//   - "unlock the power of <X>"  → "get more from <X>"
+//   - "elevate your <X>"         → "improve your <X>"
+//   - "robust" / "seamless"      → "reliable" / "smooth"
+//   - "synergy"                  → "fit"
+//   - "game-changer"             → "real shift"
+//   - "in conclusion"            → ""  (just delete + start a clean sentence)
+type AiTellRule = { pattern: RegExp; replacement: string | ((match: string) => string) };
+const AI_TELL_REPLACEMENTS: AiTellRule[] = [
+  { pattern: /\bdelve\s+into\b/gi, replacement: "explore" },
+  { pattern: /\bdelving\s+into\b/gi, replacement: "exploring" },
+  { pattern: /\bleverag(e|es|ed|ing)\b/gi, replacement: (m: string) => m.charAt(0) === "L" ? "Use" : "use" },
+  { pattern: /\b(moreover|furthermore)\b\s*,?\s*/gi, replacement: "" },
+  { pattern: /navigating the (landscape|complexities|world) of\s+/gi, replacement: "working through " },
+  { pattern: /in today'?s (rapidly evolving|fast-paced|ever-changing|dynamic)[^,.]*[,.]?\s*/gi, replacement: "" },
+  { pattern: /\bunlock the power of\b/gi, replacement: "get more from" },
+  { pattern: /\bunlock the potential of\b/gi, replacement: "get more from" },
+  { pattern: /\belevat(e|es|ed|ing) your\b/gi, replacement: "improve your" },
+  { pattern: /\brobust\b/gi, replacement: "reliable" },
+  { pattern: /\bseamless(ly)?\b/gi, replacement: (m: string) => m === "seamlessly" ? "smoothly" : "smooth" },
+  { pattern: /\bsynergy\b/gi, replacement: "fit" },
+  { pattern: /\bsynergies\b/gi, replacement: "overlap" },
+  { pattern: /\bgame-?changer\b/gi, replacement: "real shift" },
+  { pattern: /\bcutting-?edge\b/gi, replacement: "new" },
+  { pattern: /\bin conclusion\b\s*,?\s*/gi, replacement: "" },
+  { pattern: /\bto sum up\b\s*,?\s*/gi, replacement: "" },
+  { pattern: /\bat the end of the day\b\s*,?\s*/gi, replacement: "" },
+  { pattern: /\bharness(es|ed|ing)? the power of\b/gi, replacement: "use" },
+  { pattern: /\bunleash(es|ed|ing)?\b/gi, replacement: "free up" },
+  { pattern: /\bparadigm shift\b/gi, replacement: "change" },
+  { pattern: /\bventur(e|es|ed|ing) into\b/gi, replacement: "start" },
+  { pattern: /\bembark(s|ed|ing)? on\b/gi, replacement: "start" },
+  { pattern: /\bnotwithstanding\b/gi, replacement: "even so" },
+  { pattern: /\bheretofore\b/gi, replacement: "until now" },
+  { pattern: /\butilize(s|d|)?\b/gi, replacement: "use" },
+  { pattern: /\butilizing\b/gi, replacement: "using" },
+];
+
+function scrubAiTells(text: string): string {
+  let out = text;
+  for (const rule of AI_TELL_REPLACEMENTS) {
+    if (typeof rule.replacement === "string") {
+      out = out.replace(rule.pattern, rule.replacement);
+    } else {
+      out = out.replace(rule.pattern, rule.replacement);
+    }
+  }
+  // Cleanup: collapse 2+ spaces, fix space-before-punctuation introduced by drops.
+  out = out
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    // Lines that became just whitespace or punctuation after drops — kill them.
+    .replace(/^\s*[,.;:!?]+\s*$/gm, "")
+    // Collapse 3+ blank lines to 2.
+    .replace(/\n{3,}/g, "\n\n");
+  return out;
 }
 
 // Notify admin when image generation fails, but ONLY when the content

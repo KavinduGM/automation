@@ -19,9 +19,22 @@ export const PRICING = {
   "heygen.minute": { perMinuteUsd: 1.5 },
 } as const;
 
-export function claudeCost(model: "claude-sonnet-4-6" | "claude-haiku-4-5", inTok: number, outTok: number) {
+// Anthropic prompt-cache multipliers (vs base input price):
+//   cache write = 1.25× input  (first time the block is sent)
+//   cache read  = 0.10× input  (subsequent calls within ~5min TTL)
+// inTok from the SDK EXCLUDES cacheCreate + cacheRead tokens, so they're
+// billed as separate buckets here.
+export function claudeCost(
+  model: "claude-sonnet-4-6" | "claude-haiku-4-5",
+  inTok: number,
+  outTok: number,
+  opts: { cacheCreate?: number; cacheRead?: number } = {},
+) {
   const p = PRICING[model];
-  return (inTok / 1_000_000) * p.inUsdPer1M + (outTok / 1_000_000) * p.outUsdPer1M;
+  const base = (inTok / 1_000_000) * p.inUsdPer1M + (outTok / 1_000_000) * p.outUsdPer1M;
+  const cacheWrite = ((opts.cacheCreate ?? 0) / 1_000_000) * p.inUsdPer1M * 1.25;
+  const cacheRead = ((opts.cacheRead ?? 0) / 1_000_000) * p.inUsdPer1M * 0.10;
+  return base + cacheWrite + cacheRead;
 }
 
 export function imageCost(quality: "low" | "medium" | "high", n = 1): number {

@@ -11,7 +11,14 @@ function client(): Anthropic {
 }
 
 export interface ClaudeCall {
-  system: string;
+  // `system` accepts either a plain string OR an array of text blocks.
+  // The array form lets callers mark stable prefixes (system prompt,
+  // brand kit, services catalog) with `cache: true` so Anthropic
+  // ephemeral cache_control kicks in: subsequent calls in the next ~5min
+  // pay 1.25× on the first write, then 0.1× per cached read. Big win
+  // when the scheduler drafts multiple articles in the same window.
+  // Cache requires ≥1024 input tokens per block to activate.
+  system: string | Array<{ text: string; cache?: boolean }>;
   user: string;
   model?: "writing" | "routing";   // 'writing' → Sonnet, 'routing' → Haiku
   maxTokens?: number;
@@ -47,10 +54,21 @@ export async function claude<T = string>(call: ClaudeCall): Promise<ClaudeResult
       "\n\nReturn ONLY the JSON object — no markdown fences, no preamble, no commentary. Start the response with `{` and end with `}`."
     : call.user;
 
+  // Build system param. If the caller passed structured blocks with cache
+  // hints, build the cache_control-decorated array form. Otherwise stay
+  // string for maximum SDK compatibility.
+  const systemParam: string | Anthropic.TextBlockParam[] = Array.isArray(call.system)
+    ? call.system.map((b) => ({
+        type: "text" as const,
+        text: b.text,
+        ...(b.cache ? { cache_control: { type: "ephemeral" as const } } : {}),
+      }))
+    : call.system;
+
   const res = await client().messages.create({
     model,
     max_tokens: call.maxTokens ?? 4096,
-    system: call.system,
+    system: systemParam,
     messages: [{ role: "user", content: userContent }],
   });
   const text = res.content
@@ -60,7 +78,22 @@ export async function claude<T = string>(call: ClaudeCall): Promise<ClaudeResult
 
   const inTok = res.usage.input_tokens;
   const outTok = res.usage.output_tokens;
-  const costUsd = claudeCost(model as "claude-sonnet-4-6" | "claude-haiku-4-5", inTok, outTok);
+  // Cache reads are billed at 0.1× input; cache writes at 1.25×. The SDK
+  // surfaces those buckets separately when they're present.
+  const usage = res.usage as unknown as {
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+  };
+  const cacheCreate = usage.cache_creation_input_tokens ?? 0;
+  const cacheRead = usage.cache_read_input_tokens ?? 0;
+  const costUsd = claudeCost(
+    model as "claude-sonnet-4-6" | "claude-haiku-4-5",
+    inTok,
+    outTok,
+    { cacheCreate, cacheRead },
+  );
 
   let json: T | undefined;
   if (wantsJson) {
@@ -84,7 +117,10 @@ export async function claude<T = string>(call: ClaudeCall): Promise<ClaudeResult
     }
   }
 
-  logger.info({ model, inTok, outTok, costUsd }, "claude.call");
+  logger.info(
+    { model, inTok, outTok, cacheCreate, cacheRead, costUsd },
+    "claude.call",
+  );
   return { text, json, costUsd, inTokens: inTok, outTokens: outTok };
 }
 
