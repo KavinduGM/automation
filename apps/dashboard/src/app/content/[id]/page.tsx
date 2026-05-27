@@ -94,10 +94,47 @@ export default async function ContentDetail({ params }: { params: { id: string }
     redirect("/review");
   }
 
+  // Smart retry: if the item has image errors recorded, treat the retry
+  // as "image fix only" so the blog pipeline takes the regenImagesOnly
+  // fast path and the existing article body + successful images are
+  // preserved. Otherwise it's a full re-draft.
   async function retry() {
     "use server";
-    await prisma.contentItem.update({ where: { id: params.id }, data: { status: "queued" } });
+    const it = await prisma.contentItem.findUniqueOrThrow({ where: { id: params.id } });
+    const meta = (it.meta ?? {}) as { imageErrors?: Array<{ ord: number }> };
+    const hasImageErrors = (meta.imageErrors ?? []).length > 0;
+    const nextMeta = { ...(meta as Record<string, unknown>) };
+    if (hasImageErrors) {
+      nextMeta.fixScope = "images";
+      // Bumping autoFixAttempts ensures the blog pipeline reads fixScope=images
+      // and takes the regenImagesOnly fast path. Reset after success.
+      const cur = (meta as { autoFixAttempts?: number }).autoFixAttempts ?? 0;
+      nextMeta.autoFixAttempts = cur + 1;
+    } else {
+      delete nextMeta.fixScope;
+    }
+    await prisma.contentItem.update({
+      where: { id: params.id },
+      data: { status: "queued", meta: nextMeta as object },
+    });
     await queue(QUEUES.draft).add(`${item!.type}:${params.id}`, { contentItemId: params.id, type: item!.type });
+    redirect(`/content/${params.id}`);
+  }
+
+  // Explicit "retry images only" — same as above but always uses images scope,
+  // regardless of imageErrors state. Useful after the admin tops up OpenAI credits
+  // and wants to re-run image generation deliberately.
+  async function retryImagesOnly() {
+    "use server";
+    const it = await prisma.contentItem.findUniqueOrThrow({ where: { id: params.id } });
+    const meta = (it.meta ?? {}) as Record<string, unknown>;
+    const cur = (meta.autoFixAttempts as number | undefined) ?? 0;
+    const nextMeta = { ...meta, fixScope: "images", autoFixAttempts: cur + 1 };
+    await prisma.contentItem.update({
+      where: { id: params.id },
+      data: { status: "queued", meta: nextMeta as object },
+    });
+    await queue(QUEUES.draft).add(`${item!.type}:${params.id}:images-retry`, { contentItemId: params.id, type: item!.type });
     redirect(`/content/${params.id}`);
   }
 
@@ -340,7 +377,21 @@ export default async function ContentDetail({ params }: { params: { id: string }
             </>
           )}
           {(item.status === "failed" || item.status === "rejected") && (
-            <form action={retry}><button className="btn-ghost">Retry</button></form>
+            <form action={retry}>
+              <button className="btn-ghost" title="Smart retry — if images failed, only re-runs image generation; otherwise full re-draft">
+                Retry
+              </button>
+            </form>
+          )}
+          {(((item.meta ?? {}) as { imageErrors?: unknown[] }).imageErrors?.length ?? 0) > 0 && (
+            <form action={retryImagesOnly}>
+              <button
+                className="btn-ghost"
+                title="Re-run image generation only. Use after topping up OpenAI credits — keeps article body and successful images intact."
+              >
+                Retry images only
+              </button>
+            </form>
           )}
           {item.status === "published" && (
             <form action={unpublishAction}>

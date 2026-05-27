@@ -1,5 +1,5 @@
-import { prisma, Prompts, logger, brandServicesBlock, brandSiteFor, type Prisma } from "@ca/shared";
-import { claude, generateImage, grokBatchedBriefs } from "@ca/providers";
+import { prisma, Prompts, logger, brandServicesBlock, brandSiteFor, env, type Prisma } from "@ca/shared";
+import { claude, generateImage, grokBatchedBriefs, sendEmail } from "@ca/providers";
 import { bumpCost, loadBrandContext, makeSlug, markTopicUsed, setStatus, unusedTopicFor } from "./util.js";
 import { routeApproval } from "./route.js";
 import type { SeoBundle } from "./seo.js";
@@ -57,14 +57,14 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
   const itemMeta = (item.meta ?? {}) as {
     autoFixAttempts?: number;
     contentFixAttempts?: number;
-    lastFindings?: Array<{ area: string; message: string }>;
-    fixScope?: "text" | "images" | "both";
+    lastFindings?: Array<{ area: string; message: string; sectionH2?: string; severity?: string }>;
+    fixScope?: "text" | "images" | "both" | "section";
     outline?: BlogOutline;
   };
   const layoutAttempt = itemMeta.autoFixAttempts ?? 0;
   const contentAttempt = itemMeta.contentFixAttempts ?? 0;
   const totalFixAttempt = layoutAttempt + contentAttempt;
-  const fixScope: "text" | "images" | "both" =
+  const fixScope: "text" | "images" | "both" | "section" =
     totalFixAttempt > 0 ? (itemMeta.fixScope ?? "both") : "both";
 
   // Image-only fast path: reuse existing outline + body, just regen images.
@@ -75,6 +75,22 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
     await setStatus(contentItemId, "self_critique");
     await routeApproval(contentItemId);
     return;
+  }
+
+  // Section-only fast path: critic flagged specific H2 sections with
+  // sectionH2 set on each finding. Rewrite ONLY those sections, splice
+  // back into bodyMd. Skip outline + skip image regen entirely. ~80%
+  // cheaper than full re-draft for localized issues.
+  if (fixScope === "section" && itemMeta.lastFindings?.length) {
+    const ok = await regenSectionsOnly(contentItemId, item.bodyMd, itemMeta);
+    if (ok) {
+      await setStatus(contentItemId, "self_critique");
+      await routeApproval(contentItemId);
+      return;
+    }
+    // Section regen couldn't find the sections cleanly — fall through to
+    // the full text re-draft path rather than skipping the fix entirely.
+    logger.warn({ contentItemId }, "blog.section_regen_fell_through_to_full_text");
   }
 
   // 1. Get a topic
@@ -221,11 +237,155 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
   await routeApproval(contentItemId);
 }
 
-// Image-only auto-fix: keep existing outline + body, delete old image assets
-// (so the new ones replace them cleanly), and regenerate using the saved
-// outline.imagePrompts. If the saved outline is missing (legacy items), this
-// falls through to a no-op + warning so we don't crash; the routeApproval
-// still runs and the item proceeds.
+// Section-level content fix. Parses the existing bodyMd into H2 sections,
+// finds the ones flagged by the critic (matched by sectionH2 substring),
+// asks Claude to rewrite ONLY those sections with the finding as
+// correction context, and splices the new sections back into the body.
+// Returns true if at least one section was successfully rewritten;
+// false signals the caller to fall back to a full text re-draft.
+async function regenSectionsOnly(
+  contentItemId: string,
+  bodyMd: string,
+  meta: {
+    lastFindings?: Array<{ message: string; sectionH2?: string; severity?: string }>;
+    contentFixAttempts?: number;
+  },
+): Promise<boolean> {
+  await setStatus(contentItemId, "drafting");
+  const findings = (meta.lastFindings ?? []).filter((f) => f.sectionH2);
+  if (findings.length === 0) return false;
+
+  // Split body into segments keyed by H2 text. Preserves the H1 + intro
+  // (before the first ##) and any trailing FAQ section that uses ###.
+  const sections = splitByH2(bodyMd);
+  if (sections.h2Sections.length === 0) return false;
+
+  // Group findings by their H2 (multiple findings may target the same section).
+  const issuesBySection = new Map<string, Array<{ message: string; severity?: string }>>();
+  for (const f of findings) {
+    const key = normalizeH2(f.sectionH2 ?? "");
+    if (!key) continue;
+    if (!issuesBySection.has(key)) issuesBySection.set(key, []);
+    issuesBySection.get(key)!.push({ message: f.message, severity: f.severity });
+  }
+
+  let regeneratedAny = false;
+  for (const sec of sections.h2Sections) {
+    const matches = issuesBySection.get(normalizeH2(sec.heading));
+    if (!matches || matches.length === 0) continue;
+
+    const issuesBlock = matches.map((m) => `- [${m.severity ?? "med"}] ${m.message}`).join("\n");
+    const sectionMd = `## ${sec.heading}\n\n${sec.body}`;
+
+    try {
+      const res = await claude<string>({
+        model: "writing",
+        maxTokens: 2500,
+        system:
+          `You are rewriting ONE H2 section of a B2B blog article. ` +
+          `Preserve the H2 heading exactly. Keep the same length and structure (paragraph count + H3s if any). ` +
+          `Apply ALL brand style rules from the parent draft (no em dashes, no AI tells, contractions OK, varied sentence length). ` +
+          `Keep any [[IMAGE_N]] or [[CTA: ...]] markers that were in the original section, in the same positions. ` +
+          `Return the rewritten section in pure Markdown — heading first, then body. No prose before or after.`,
+        user:
+          `# Critic flagged the following issues in this section:\n${issuesBlock}\n\n` +
+          `# Original section:\n\n${sectionMd}\n\n` +
+          `Rewrite to resolve every flagged issue. Return Markdown only.`,
+      });
+      await bumpCost(contentItemId, res.costUsd);
+      const rewritten = scrubDashes(res.text).trim();
+      if (!rewritten || !rewritten.toLowerCase().startsWith("## ")) {
+        logger.warn({ contentItemId, heading: sec.heading }, "blog.section_regen_returned_invalid");
+        continue;
+      }
+      sec.regenerated = rewritten;
+      regeneratedAny = true;
+    } catch (err) {
+      logger.warn({ err, contentItemId, heading: sec.heading }, "blog.section_regen_call_failed");
+    }
+  }
+
+  if (!regeneratedAny) return false;
+
+  // Stitch the body back together: leading content + (possibly rewritten) sections + trailing.
+  const stitched = [
+    sections.leading,
+    ...sections.h2Sections.map((s) => s.regenerated ?? `## ${s.heading}\n\n${s.body}`),
+    sections.trailing,
+  ]
+    .filter((p) => p.trim().length > 0)
+    .join("\n\n");
+
+  await prisma.contentItem.update({
+    where: { id: contentItemId },
+    data: { bodyMd: stitched },
+  });
+
+  logger.info(
+    { contentItemId, sectionsTouched: sections.h2Sections.filter((s) => s.regenerated).length, totalSections: sections.h2Sections.length },
+    "blog.section_regen_done",
+  );
+  return true;
+}
+
+// Splits a blog body into the H1+intro before the first H2, the H2-bounded
+// sections, and any trailing content after the last H2 (FAQ block etc).
+// Heading text is captured WITHOUT the "## " prefix.
+function splitByH2(body: string): {
+  leading: string;
+  h2Sections: Array<{ heading: string; body: string; regenerated?: string }>;
+  trailing: string;
+} {
+  const lines = body.split("\n");
+  const blocks: Array<{ heading: string | null; lines: string[] }> = [{ heading: null, lines: [] }];
+  for (const line of lines) {
+    const m = /^##\s+(.+?)\s*$/.exec(line);
+    if (m) {
+      blocks.push({ heading: m[1] ?? "", lines: [] });
+    } else {
+      blocks[blocks.length - 1]!.lines.push(line);
+    }
+  }
+  const leading = (blocks[0]?.lines ?? []).join("\n").trim();
+  const h2Blocks = blocks.slice(1).filter((b) => b.heading !== null);
+  // Detect trailing FAQ-style content: if a section's heading is exactly
+  // "Frequently asked questions" (case-insensitive), treat it as trailing
+  // so the rewriter doesn't touch ### Q&A pairs.
+  let trailingIdx = -1;
+  for (let i = h2Blocks.length - 1; i >= 0; i -= 1) {
+    const h = h2Blocks[i]!.heading!;
+    if (/^frequently asked questions$/i.test(h.trim()) || /^faq$/i.test(h.trim())) {
+      trailingIdx = i;
+      break;
+    }
+  }
+  const h2Sections = (trailingIdx >= 0 ? h2Blocks.slice(0, trailingIdx) : h2Blocks).map((b) => ({
+    heading: b.heading ?? "",
+    body: b.lines.join("\n").trim(),
+  }));
+  const trailing =
+    trailingIdx >= 0
+      ? h2Blocks
+          .slice(trailingIdx)
+          .map((b) => `## ${b.heading}\n\n${b.lines.join("\n").trim()}`)
+          .join("\n\n")
+      : "";
+  return { leading, h2Sections, trailing };
+}
+
+function normalizeH2(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+// Image-only auto-fix: keep existing outline + body. Two modes:
+//   1. Targeted (preferred) — meta.imageErrors lists which `ord`s failed
+//      last time. Only delete + regenerate THOSE; successful images stay.
+//      This is the common case when admin retries after fixing OpenAI credits.
+//   2. Full — no imageErrors stored. Wipe all image assets and regen all
+//      from the saved outline (legacy items or layout-review rollbacks).
+//
+// If the saved outline is missing (legacy items), this falls through to a
+// no-op + warning so we don't crash; routeApproval still runs.
 async function regenImagesOnly(
   contentItemId: string,
   business: { id: string; slug: string },
@@ -236,29 +396,53 @@ async function regenImagesOnly(
     logger.warn({ contentItemId }, "blog.regen_images_only_missing_outline");
     return;
   }
-  // Wipe existing image assets so the new generation replaces them.
-  await prisma.asset.deleteMany({
-    where: { contentItemId, kind: "image" },
-  });
   const item = await prisma.contentItem.findUniqueOrThrow({ where: { id: contentItemId } });
   const slug = item.slug ?? makeSlug(item.title);
+  const meta = (item.meta ?? {}) as { imageErrors?: Array<{ ord: number }> };
+  const failedOrds = (meta.imageErrors ?? []).map((e) => e.ord).filter((o) => Number.isFinite(o));
+
+  if (failedOrds.length > 0) {
+    // Targeted retry — only the previously-failed images. Keep the rest.
+    logger.info({ contentItemId, failedOrds }, "blog.regen_images_targeted");
+    await prisma.asset.deleteMany({
+      where: { contentItemId, kind: "image", ord: { in: failedOrds } },
+    });
+    await runImageGeneration(
+      contentItemId,
+      business.id,
+      business.slug,
+      slug,
+      savedOutline.imagePrompts,
+      failedOrds,
+    );
+    return;
+  }
+
+  // Full image regen — no per-image error info, wipe all and try fresh.
+  await prisma.asset.deleteMany({ where: { contentItemId, kind: "image" } });
   await runImageGeneration(contentItemId, business.id, business.slug, slug, savedOutline.imagePrompts);
 }
 
 // Run the image generation loop and capture any per-image errors visibly on
 // meta.imageErrors so they're debuggable from the dashboard instead of only
 // surfacing as a marker_leak finding after post-review.
+//
+// `onlyOrds` (optional) restricts generation to those ord indices — used
+// by the targeted-retry path so successful images aren't regenerated.
 async function runImageGeneration(
   contentItemId: string,
   businessId: string,
   businessSlug: string,
   slug: string,
   imagePrompts: BlogOutline["imagePrompts"],
+  onlyOrds?: number[],
 ): Promise<void> {
   await setStatus(contentItemId, "generating_media");
+  const ordsToGenerate = onlyOrds && onlyOrds.length > 0 ? new Set(onlyOrds) : null;
   const errors: Array<{ ord: number; prompt: string; message: string }> = [];
   let succeeded = 0;
   for (const [i, ip] of imagePrompts.slice(0, 5).entries()) {
+    if (ordsToGenerate && !ordsToGenerate.has(i)) continue;
     try {
       const img = await generateImage({
         prompt: ip.prompt,
@@ -289,23 +473,35 @@ async function runImageGeneration(
   }
   // Persist the error list (and clear it on success) so the dashboard can
   // show "2/4 images failed: <reason>" instead of mysteriously missing media.
+  // For targeted retries, MERGE: keep existing imageErrors for ords we didn't
+  // touch, replace entries for ords we just attempted.
   const current = await prisma.contentItem.findUniqueOrThrow({ where: { id: contentItemId } });
+  const currentMeta = (current.meta ?? {}) as { imageErrors?: Array<{ ord: number; prompt: string; message: string }> };
+  let mergedErrors: Array<{ ord: number; prompt: string; message: string }>;
+  if (ordsToGenerate) {
+    const untouched = (currentMeta.imageErrors ?? []).filter((e) => !ordsToGenerate.has(e.ord));
+    mergedErrors = [...untouched, ...errors];
+  } else {
+    mergedErrors = errors;
+  }
+  const attemptedCount = ordsToGenerate ? ordsToGenerate.size : Math.min(imagePrompts.length, 5);
   await prisma.contentItem.update({
     where: { id: contentItemId },
     data: {
       meta: {
         ...(current.meta as object),
-        imageErrors: errors as unknown as Prisma.InputJsonValue,
+        imageErrors: mergedErrors as unknown as Prisma.InputJsonValue,
         imagesGenerated: succeeded,
-        imagesAttempted: Math.min(imagePrompts.length, 5),
+        imagesAttempted: attemptedCount,
       } as Prisma.InputJsonValue,
     },
   });
   if (errors.length > 0) {
     logger.warn(
-      { contentItemId, failed: errors.length, succeeded },
+      { contentItemId, failed: errors.length, succeeded, targeted: !!ordsToGenerate },
       "blog.image_generation_partial",
     );
+    await maybeNotifyAdminOfImageFailure(contentItemId, errors);
   }
 }
 
@@ -459,6 +655,95 @@ function scrubDashes(text: string): string {
     .replace(/,{2,}/g, ",")
     // collapse ", ." or ", :"
     .replace(/,\s*([.;:!?])/g, "$1");
+}
+
+// Notify admin when image generation fails, but ONLY when the content
+// plan is on AI-review mode (admin needs to act — fix OpenAI credits and
+// click Retry). For human_review or auto mode, the human is already in
+// the loop or has accepted unattended risk respectively. Detects
+// insufficient_quota / billing_hard_limit errors specifically and calls
+// them out in the subject line.
+async function maybeNotifyAdminOfImageFailure(
+  contentItemId: string,
+  errors: Array<{ ord: number; prompt: string; message: string }>,
+): Promise<void> {
+  try {
+    const item = await prisma.contentItem.findUnique({
+      where: { id: contentItemId },
+      include: { business: true },
+    });
+    if (!item) return;
+    const plan = await prisma.contentPlan.findUnique({
+      where: { businessId_contentType: { businessId: item.businessId, contentType: item.type } },
+    });
+    if (plan?.approvalMode !== "ai_review") {
+      logger.info({ contentItemId, mode: plan?.approvalMode }, "blog.image_failure_email_skipped_not_ai_review");
+      return;
+    }
+    const to = env().APPROVAL_DIGEST_TO;
+    if (!to) {
+      logger.warn({ contentItemId }, "blog.image_failure_email_skipped_no_recipient");
+      return;
+    }
+
+    const creditExhausted = errors.some((e) => isCreditExhaustedError(e.message));
+    const reason = creditExhausted ? "OpenAI credits exhausted" : "Image API failure";
+    const subject = `[Automation] ${reason} — ${item.business.name} · ${item.title || "(untitled)"}`;
+    const dashUrl = `${env().DASHBOARD_URL.replace(/\/$/, "")}/content/${contentItemId}`;
+
+    const html = `
+      <div style="font-family: ui-sans-serif, system-ui, sans-serif; max-width: 600px;">
+        <h2 style="color: #b91c1c;">${reason}</h2>
+        <p>${errors.length} image${errors.length === 1 ? "" : "s"} failed to generate for this article:</p>
+        <ul>
+          <li><b>Business:</b> ${escapeHtml(item.business.name)}</li>
+          <li><b>Title:</b> ${escapeHtml(item.title || "(untitled)")}</li>
+          <li><b>Type:</b> ${item.type}</li>
+        </ul>
+        ${creditExhausted
+          ? `<p><b>Most likely cause:</b> your OpenAI account is out of credits or hit a billing limit. Top up the account, then click <b>Retry images only</b> on the content page — the existing article text and successful images will be kept.</p>`
+          : `<p>See the errors below and check the OpenAI dashboard for status. After fixing, click <b>Retry images only</b> on the content page.</p>`}
+        <h3>Errors</h3>
+        <ul style="font-family: ui-monospace, monospace; font-size: 12px;">
+          ${errors.map((e) => `<li><b>image #${e.ord}:</b> ${escapeHtml(e.message)}</li>`).join("")}
+        </ul>
+        <p><a href="${dashUrl}" style="display: inline-block; background: #6D28D9; color: white; padding: 8px 16px; text-decoration: none; border-radius: 4px;">Open in dashboard</a></p>
+      </div>`;
+
+    await sendEmail({
+      to,
+      subject,
+      html,
+      text: `${reason}\n\n${errors.length} image(s) failed for ${item.title || "(untitled)"}.\nOpen: ${dashUrl}\n\nErrors:\n${errors.map((e) => `- image #${e.ord}: ${e.message}`).join("\n")}`,
+    });
+    logger.info({ contentItemId, recipients: to, creditExhausted }, "blog.image_failure_email_sent");
+  } catch (err) {
+    logger.warn({ err, contentItemId }, "blog.image_failure_email_failed");
+  }
+}
+
+// Detects the common "out of credits / billing limit" error shapes from
+// OpenAI so the admin email can be more specific than just "API failure".
+function isCreditExhaustedError(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes("insufficient_quota") ||
+    m.includes("insufficient credit") ||
+    m.includes("billing_hard_limit") ||
+    m.includes("billing hard limit") ||
+    m.includes("exceeded your current quota") ||
+    m.includes("you exceeded your") ||
+    m.includes("rate_limit_exceeded") && m.includes("quota")
+  );
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 // Re-export so the WebX site (in this monorepo) and other callers can use

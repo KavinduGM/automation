@@ -130,11 +130,27 @@ async function runAiReview(
   }
 
   // Re-draft. Reuse the blog pipeline's correction-context mechanism via
-  // meta.lastFindings; classify everything here as a text issue (the
-  // critic doesn't read images).
-  const lastFindings = verdict.issues
-    .filter((i) => i.severity === "high" || i.severity === "med")
-    .map((i) => ({ area: "content", message: `${i.where}: ${i.what}`, severity: i.severity }));
+  // meta.lastFindings. If EVERY high/med issue carries a sectionH2, we
+  // can scope the fix to those sections instead of re-drafting the whole
+  // article — much cheaper, and avoids touching parts that were fine.
+  const relevantIssues = verdict.issues.filter(
+    (i) => i.severity === "high" || i.severity === "med",
+  );
+  type IssueWithSection = typeof relevantIssues[number] & { sectionH2?: string };
+  const lastFindings = relevantIssues.map((i) => ({
+    area: "content",
+    message: `${i.where}: ${i.what}`,
+    severity: i.severity,
+    sectionH2: (i as IssueWithSection).sectionH2,
+  }));
+
+  const allHaveSections =
+    relevantIssues.length > 0 &&
+    relevantIssues.every((i) => {
+      const s = (i as IssueWithSection).sectionH2;
+      return typeof s === "string" && s.trim().length > 0;
+    });
+  const nextFixScope: "section" | "text" = allHaveSections ? "section" : "text";
 
   await prisma.contentItem.update({
     where: { id: contentItemId },
@@ -143,10 +159,10 @@ async function runAiReview(
         ...(item.meta as object),
         critic: verdict as unknown as Prisma.InputJsonValue,
         contentFixAttempts: nextAttempt,
-        fixScope: "text",
+        fixScope: nextFixScope,
         lastFindings: lastFindings as unknown as Prisma.InputJsonValue,
       } as Prisma.InputJsonValue,
-      reviewNotes: `Content fix ${nextAttempt}/${MAX_CONTENT_FIX_ATTEMPTS} (AI critic flagged) — re-drafting…\n${issuesSummary}`,
+      reviewNotes: `Content fix ${nextAttempt}/${MAX_CONTENT_FIX_ATTEMPTS} (scope: ${nextFixScope}) — ${issuesSummary}`,
     },
   });
   await setStatus(contentItemId, "queued");

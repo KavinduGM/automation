@@ -47,7 +47,15 @@ CHECKS (the ONLY things that can produce an "issue"):
 Output JSON only, no prose:
 {
   "scores":  { "voice": 0-100, "accuracy": 0-100, "structure": 0-100, "seo": 0-100, "cta": 0-100 },
-  "issues":  [{ "severity": "low"|"med"|"high", "where": string, "what": string }],
+  "issues":  [{
+    "severity":  "low"|"med"|"high",
+    "where":    string,   // human-readable location, e.g. "Section 3 'Implementation'" or "H1" or "intro paragraph"
+    "what":     string,   // what's wrong, concretely
+    "sectionH2": string?  // OPTIONAL but PREFERRED — exact text of the H2 heading the issue is in.
+                          // Provide this whenever the issue is scoped to one section so we can regen
+                          // only that section instead of the whole article. Omit for issues that span
+                          // the whole article (e.g. "brand not mentioned anywhere", "no internal links").
+  }],
   "verdict": "approve" | "revise" | "escalate"
 }
 
