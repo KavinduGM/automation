@@ -42,6 +42,21 @@ Output JSON only, matching exactly this schema:
                                      // This is what shows on the cover — NOT the full title. The brand
                                      // template crops anything longer; keep it punchy.
 
+  "coverScene":    string,           // 6-15 words describing the BACKGROUND + PROPS for the cover.
+                                     // The composition (device-right, headline-left, "Blog" badge) is
+                                     // locked for brand consistency — what changes is the surrounding
+                                     // environment. Pick a scene that matches the article's TOPIC so
+                                     // covers feel curated, not stamped. Examples:
+                                     //   AI/ML topic         → "engineer's dual-monitor workstation, plants and notebook in soft focus"
+                                     //   Video/content topic → "creator studio with blurred camera, tripod and ring light in background"
+                                     //   eCommerce topic     → "designer's desk with packaging mockups and product samples blurred behind"
+                                     //   Analytics topic     → "modern office with city window, coffee mug and printed dashboards on desk"
+                                     //   B2B SaaS / strategy → "minimalist boardroom-style table with leather notebook and pen"
+                                     //   Chatbot/AI agent    → "developer's workspace with mechanical keyboard, headphones, and architecture sketches"
+                                     //   CRM/sales topic     → "modern sales-team workspace with sticky notes and a wireless mouse, plant in corner"
+                                     // The scene appears in the BACKGROUND only — the device + text
+                                     // remain dominant. Avoid people in the foreground.
+
   "sections": [
     { "h2": string, "bullets": string[] }
   ],                                 // EXACTLY 6 sections, in this fixed shape:
@@ -77,12 +92,24 @@ Output JSON only, matching exactly this schema:
   //     - "photo": real-world photographic scene. NO text in the image. NO labels.
   //                Use for human-oriented sections (someone working, a team meeting,
   //                a workspace). Brand-safe, no stock-photo clichés.
-  //     - "diagram": clean flat illustration in the brand color palette. LABELS
-  //                  AND SHORT TEXT ARE ALLOWED AND ENCOURAGED. Use for
+  //                "labels" field: omit (or empty array).
+  //     - "diagram": clean flat illustration in the brand color palette. Use for
   //                  architecture / workflow / data-flow / process / framework
-  //                  diagrams. Always name the parts — empty shapes are useless.
-  //                  Example: a 5-step pipeline with labeled stages, an
-  //                  architecture diagram with labeled service boxes.
+  //                  diagrams.
+  //                "labels" field: REQUIRED. Provide the EXACT text that should
+  //                appear in the diagram — 2-5 short labels, each 1-3 words,
+  //                in left-to-right or top-to-bottom order. The image model
+  //                will render these verbatim. Without explicit labels, freeform
+  //                "label your shapes" instructions produce garbled text
+  //                ("Senime B" instead of "Service B").
+  //                Example for a 3-step lead-validation flow:
+  //                  { "prompt": "Three-step lead validation pipeline with arrows between stages",
+  //                    "labels": ["Capture", "Validate", "Route"], ... }
+  //                Example for a service-layer architecture:
+  //                  { "prompt": "Three-layer service architecture stacked vertically with arrows down",
+  //                    "labels": ["Web App", "API Gateway", "Database"], ... }
+  //                Labels MUST use common English words spelled correctly. No abbreviations
+  //                the model might mangle ("DB" → use "Database"; "Auth" → use "Login").
   // alt text: 8-14 word factual description regardless of style.
 
   "ctaMidArticle": {                 // mid-article InlineCTABanner

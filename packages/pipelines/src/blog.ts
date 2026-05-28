@@ -36,6 +36,16 @@ export interface BlogOutline {
   // article title was getting cropped on display ("SCALABLE WEB" → "ICALABLE WEB").
   // Examples: "READY TO DEPLOY ML MODELS?", "STRUGGLING WITH B2B SCALE?"
   coverHeadline: string;
+  // Topic-driven scene description (background + props + lighting mood) so
+  // every cover doesn't look identical. The composition is locked (device
+  // on right, headline on left, "Blog" badge) so the brand series stays
+  // coherent — only the surrounding environment varies. ~6-15 words.
+  // Examples:
+  //   "creator studio with blurred camera, tripod and ring light in background"
+  //   "engineer's dual-monitor workstation, plants and notebook in soft focus"
+  //   "minimalist designer desk with sketches and stylus visible"
+  //   "boardroom-style table with leather notebook and city window backdrop"
+  coverScene: string;
   sections: Array<{ h2: string; bullets: string[] }>;
   imagePrompts: Array<{
     prompt: string;                       // body images: full image prompt; hero: short subject hint (e.g. "a CRM analytics dashboard")
@@ -43,6 +53,12 @@ export interface BlogOutline {
     placement: "hero" | "section";
     afterSectionIdx?: number;
     style?: "photo" | "diagram";          // body images only; ignored for hero. Diagrams may include short labels in the image.
+    // REQUIRED when style === "diagram": exact text labels to render inside
+    // the image, in left-to-right (or top-to-bottom) order. gpt-image-1
+    // renders specified text far more reliably than freeform "label your
+    // shapes" — that's where the gibberish ("Senime B") came from.
+    // 2-5 labels, each 1-3 words. Empty for photos.
+    labels?: string[];
   }>;
   ctaMidArticle: { afterSectionIdx: number; title: string; href: string };
   ctaPreFaq: { title: string; href: string };
@@ -337,7 +353,7 @@ export async function runBlogPipeline(contentItemId: string): Promise<void> {
       "blog.skipping_images_text_only_fix",
     );
   } else {
-    await runImageGeneration(contentItemId, business.id, business.slug, slug, outline.imagePrompts ?? [], outline.title, outline.coverHeadline);
+    await runImageGeneration(contentItemId, business.id, business.slug, slug, outline.imagePrompts ?? [], outline.title, outline.coverHeadline, outline.coverScene);
   }
 
   // 5. Self-critique → route
@@ -525,6 +541,7 @@ async function regenImagesOnly(
       savedOutline.imagePrompts,
       savedOutline.title,
       savedOutline.coverHeadline,
+      savedOutline.coverScene,
       failedOrds,
     );
     return;
@@ -532,7 +549,7 @@ async function regenImagesOnly(
 
   // Full image regen — no per-image error info, wipe all and try fresh.
   await prisma.asset.deleteMany({ where: { contentItemId, kind: "image" } });
-  await runImageGeneration(contentItemId, business.id, business.slug, slug, savedOutline.imagePrompts, savedOutline.title, savedOutline.coverHeadline);
+  await runImageGeneration(contentItemId, business.id, business.slug, slug, savedOutline.imagePrompts, savedOutline.title, savedOutline.coverHeadline, savedOutline.coverScene);
 }
 
 // Build the brand-templated cover image prompt. Every cover image in the
@@ -548,52 +565,67 @@ function buildBrandCoverPrompt(
   fallbackTitle: string,
   coverSubject: string,
   coverHeadline?: string,
+  coverScene?: string,
 ): string {
   if (!style) return `${coverSubject}. ${fallbackTitle}.`;
   // Prefer the short hook headline; fall back to the article title if outline
   // didn't supply one. Always upper-case for visual weight.
   const raw = (coverHeadline ?? fallbackTitle).trim();
   const headline = raw.toUpperCase();
+  // Scene varies the BACKGROUND environment + props per article so the
+  // series doesn't look stamped. Composition stays locked for brand identity.
+  const sceneLine = coverScene && coverScene.trim().length > 0
+    ? `Scene: ${coverScene.trim()} — kept SOFT-FOCUS in the background only; never compete with the device or headline.`
+    : `Scene: clean studio surface, soft natural light.`;
   return [
     `Create a 16:9 brand cover image — wide horizontal composition.`,
-    `Background: clean studio surface in ${style.backgroundColor}.`,
+    `Background: ${style.backgroundColor} as the dominant base color.`,
+    sceneLine,
     `Accent color: ${style.themeColor} — used ONLY for the headline typography and a small badge.`,
-    `IMPORTANT — Safe zone: all text, the device, and the badge MUST stay within the CENTER 70% of the frame. The outer 15% on each side and 10% top/bottom must be empty studio background. This prevents any text or content from being cropped when the image is displayed at different aspect ratios.`,
+    `IMPORTANT — Safe zone: all text, the device, and the badge MUST stay within the CENTER 70% of the frame. The outer 15% on each side and 10% top/bottom should be the soft-focus scene background. This prevents any text or content from being cropped when the image is displayed at different aspect ratios.`,
     `Right side of the frame (inside the safe zone): ${style.deviceHint}, screen visible and in focus.`,
     `The device screen displays: ${coverSubject}.`,
     `Left side of the frame (inside the safe zone): vertical text block —`,
     `  Headline (large, bold, color ${style.themeColor}, MUST FIT on 2-3 lines): "${headline}"`,
     `  Below the headline, a small rounded pill badge — background ${style.themeColor}, text white — saying "Blog".`,
-    style.extraStyleHints ? `Style: ${style.extraStyleHints}.` : "",
-    `Rendering rules: the headline text must be clearly legible and exactly as written. No extra background text, no watermarks, no AI artefacts, no garbled glyphs. Keep everything well within the safe zone.`,
+    style.extraStyleHints ? `Photographic style: ${style.extraStyleHints}.` : "",
+    `Rendering rules: the headline text must be clearly legible and exactly as written. No extra background text, no watermarks, no AI artefacts, no garbled glyphs. No people in the foreground. Keep the headline + device dominant; the scene props are atmosphere only.`,
   ]
     .filter(Boolean)
     .join("\n");
 }
 
 // Augment a body image prompt with style-specific guardrails. Photos get
-// the no-text + no-stock-cliché reminder; diagrams get permission to use
-// labels (which is the whole point of a diagram) and a brand-color hint.
+// the no-text + no-stock-cliché reminder; diagrams get the explicit
+// label list quoted verbatim so the image model renders correct text
+// instead of garbled characters.
 function augmentBodyPrompt(
   rawPrompt: string,
   style: "photo" | "diagram",
   brandThemeColor: string | undefined,
+  labels: string[] | undefined,
 ): string {
   if (style === "diagram") {
     const colorHint = brandThemeColor
       ? `Use ${brandThemeColor} as the primary accent color for shapes, arrows, and label backgrounds.`
       : "Use a single brand accent color throughout.";
+    // Cap at 5 labels — more than that and the model starts skipping/
+    // mangling text. Quote each one so the model treats it as literal.
+    const safeLabels = (labels ?? []).slice(0, 5).filter((l) => l && l.trim().length > 0);
+    const labelLine = safeLabels.length > 0
+      ? `The diagram MUST contain ONLY these labels, spelled EXACTLY as written and clearly readable: ${safeLabels.map((l) => `"${l.trim()}"`).join(", ")}. Each label appears EXACTLY ONCE. Do NOT add any other words, captions, titles, or numbers anywhere in the image.`
+      : `Every shape needs ONE short readable label (1-3 common English words). No other text anywhere.`;
     return [
-      rawPrompt,
+      rawPrompt + ".",
       `Clean flat illustration on a white background.`,
       colorHint,
-      `Every shape MUST have a short, crisp, clearly readable label (1-3 words). Empty shapes are not allowed — name what each box, circle, or arrow represents.`,
-      `Labels must render as accurate text (no garbled or repeated characters). No decorative chrome, no extra background art.`,
+      labelLine,
+      `Use simple geometric shapes (rectangles, circles, arrows) and sans-serif typography. Plenty of whitespace between labels so text renders crisply. No decorative chrome, no extra background art, no watermarks, no AI artefacts.`,
     ].join(" ");
   }
   // photo (default)
   return [
-    rawPrompt,
+    rawPrompt + ".",
     `Real photograph. No text in the image, no labels, no watermarks. Avoid stock-photo clichés (no smiling-team-around-a-laptop). Brand-safe, agency-grade.`,
   ].join(" ");
 }
@@ -612,6 +644,7 @@ async function runImageGeneration(
   imagePrompts: BlogOutline["imagePrompts"],
   articleTitle: string,
   coverHeadline: string | undefined,
+  coverScene: string | undefined,
   onlyOrds?: number[],
 ): Promise<void> {
   await setStatus(contentItemId, "generating_media");
@@ -629,10 +662,10 @@ async function runImageGeneration(
     let finalPrompt: string;
     if (isHero) {
       finalPrompt = brand?.coverImageStyle
-        ? buildBrandCoverPrompt(brand.coverImageStyle, articleTitle, ip.prompt, coverHeadline)
+        ? buildBrandCoverPrompt(brand.coverImageStyle, articleTitle, ip.prompt, coverHeadline, coverScene)
         : ip.prompt;
     } else {
-      finalPrompt = augmentBodyPrompt(ip.prompt, ip.style ?? "photo", brand?.coverImageStyle?.themeColor);
+      finalPrompt = augmentBodyPrompt(ip.prompt, ip.style ?? "photo", brand?.coverImageStyle?.themeColor, ip.labels);
     }
     const styleLabel = isHero ? "brand cover" : (ip.style ?? "photo");
     const label = `Image #${i}${isHero ? " · hero (cover)" : ` · ${styleLabel}`}`;
@@ -833,6 +866,12 @@ function validateOutlineStructure(o: BlogOutline): string[] {
     issues.push(`coverHeadline must be 4-7 words (a punchy question/hook), got ${coverWordCount} ("${o.coverHeadline ?? ""}")`);
   }
 
+  // Cover scene: 6-15 words. Drives the per-cover variety (background + props).
+  const sceneWordCount = (o.coverScene ?? "").trim().split(/\s+/).filter(Boolean).length;
+  if (sceneWordCount < 5 || sceneWordCount > 20) {
+    issues.push(`coverScene must be 6-15 words (background + props for the cover), got ${sceneWordCount}`);
+  }
+
   // Article archetype must be one of the supported types.
   const VALID_TYPES = [
     "problem_solving","tutorial","industry_analysis","comparison",
@@ -840,6 +879,24 @@ function validateOutlineStructure(o: BlogOutline): string[] {
   ];
   if (!o.articleType || !VALID_TYPES.includes(o.articleType)) {
     issues.push(`articleType must be one of: ${VALID_TYPES.join(", ")} (got "${o.articleType ?? "missing"}")`);
+  }
+
+  // Diagram body images must supply explicit labels — gpt-image-1 garbles
+  // any free-form "label your shapes" instruction. 2-5 labels per diagram.
+  for (const [i, ip] of (o.imagePrompts ?? []).entries()) {
+    if (i === 0) continue; // hero never has labels
+    if (ip?.style === "diagram") {
+      const labels = (ip.labels ?? []).filter((l) => typeof l === "string" && l.trim().length > 0);
+      if (labels.length < 2 || labels.length > 5) {
+        issues.push(`imagePrompts[${i}] is style=diagram and needs 2-5 explicit labels, got ${labels.length}`);
+      }
+      for (const lab of labels) {
+        const wordCount = lab.trim().split(/\s+/).length;
+        if (wordCount > 3) {
+          issues.push(`imagePrompts[${i}].labels: each label must be 1-3 words, got "${lab}" (${wordCount} words)`);
+        }
+      }
+    }
   }
 
   return issues;
