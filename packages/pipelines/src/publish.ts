@@ -1,4 +1,5 @@
 import { prisma, logger, queue, QUEUES, type Prisma } from "@ca/shared";
+import { Prisma as PrismaRuntime } from "@prisma/client"; // for runtime constants like JsonNull
 import { schedulePost, revalidateForContent } from "@ca/providers";
 import { setStatus, logStep } from "./util.js";
 import { publishedSeo, type SeoBundle, emptySeo } from "./seo.js";
@@ -286,6 +287,8 @@ async function publishCaseStudy(item: Item) {
     results: (s.results ?? []) as unknown as Prisma.InputJsonValue,
     techDelivered: s.techDelivered ?? [],
     metrics: (s.metrics ?? []) as unknown as Prisma.InputJsonValue,
+    // Nullable JSON columns require PrismaRuntime.JsonNull (writes SQL NULL),
+    // not raw null. Use it for any optional structured payload we don't have.
     testimonial: intake.quote
       ? ({
           quote: intake.quote,
@@ -293,10 +296,10 @@ async function publishCaseStudy(item: Item) {
           role: intake.quoteRole ?? null,
           flag: intake.quoteFlag ?? null,
         } as unknown as Prisma.InputJsonValue)
-      : (null as unknown as Prisma.InputJsonValue | null),
-    closing: (s.closing ?? null) as unknown as Prisma.InputJsonValue | null,
-    finalCta: (s.finalCta ?? null) as unknown as Prisma.InputJsonValue | null,
-    about: (s.about ?? null) as unknown as Prisma.InputJsonValue | null,
+      : PrismaRuntime.JsonNull,
+    closing: s.closing ? (s.closing as unknown as Prisma.InputJsonValue) : PrismaRuntime.JsonNull,
+    finalCta: s.finalCta ? (s.finalCta as unknown as Prisma.InputJsonValue) : PrismaRuntime.JsonNull,
+    about: s.about ? (s.about as unknown as Prisma.InputJsonValue) : PrismaRuntime.JsonNull,
     imageRoster: imageRoster as unknown as Prisma.InputJsonValue,
   };
 
