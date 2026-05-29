@@ -242,6 +242,64 @@ async function publishCaseStudy(item: Item) {
   });
   if (!seoFields.ogImageAlt && cover.alt) seoFields.ogImageAlt = cover.alt;
 
+  // Pull the structured payload the pipeline wrote on meta.structured.
+  // pillars[].images already have their src/alt resolved at expansion time.
+  const meta = (item.meta ?? {}) as {
+    structured?: {
+      subtitle?: string;
+      headline?: string;
+      shortDescription?: string;
+      category?: string;
+      tags?: string[];
+      problemIntro?: string;
+      problems?: Array<{ title: string; text: string }>;
+      problemCallout?: string;
+      solutionIntro?: string;
+      pillars?: Array<{ title: string; intro: string; featuresLabel: string; features: string[]; images?: Array<{ src: string; alt: string; caption: string }> }>;
+      results?: Array<{ label: string; text: string }>;
+      techDelivered?: string[];
+      metrics?: Array<{ value: string; label: string }>;
+      closing?: { lede: string; punchline: string; cta: string; callout: string };
+      finalCta?: { heading: string; intro: string; tiredOf: string[]; tiredOfOutro: string; finalLine: string };
+      about?: { intro: string; services: string[] };
+    };
+  };
+  const s = meta.structured ?? {};
+  // Build the imageRoster snapshot for admin display.
+  const allImages = item.assets.filter((a) => a.kind === "image");
+  const imageRoster = allImages.map((a) => ({ role: (a as { role?: string | null }).role ?? null, path: a.path, alt: a.altText ?? "" }));
+
+  const structuredFields = {
+    subtitle: s.subtitle ?? null,
+    headline: s.headline ?? null,
+    shortDescription: s.shortDescription ?? null,
+    industry: intake.industry ?? null,
+    location: intake.location ?? null,
+    projectType: intake.projectType ?? null,
+    timeline: intake.timeline ?? null,
+    category: s.category ?? intake.category ?? null,
+    tags: s.tags ?? [],
+    problems: (s.problems ?? []) as unknown as Prisma.InputJsonValue,
+    problemCallout: s.problemCallout ?? null,
+    solutionIntro: s.solutionIntro ?? null,
+    pillars: (s.pillars ?? []) as unknown as Prisma.InputJsonValue,
+    results: (s.results ?? []) as unknown as Prisma.InputJsonValue,
+    techDelivered: s.techDelivered ?? [],
+    metrics: (s.metrics ?? []) as unknown as Prisma.InputJsonValue,
+    testimonial: intake.quote
+      ? ({
+          quote: intake.quote,
+          name: intake.quoteAuthor ?? null,
+          role: intake.quoteRole ?? null,
+          flag: intake.quoteFlag ?? null,
+        } as unknown as Prisma.InputJsonValue)
+      : (null as unknown as Prisma.InputJsonValue | null),
+    closing: (s.closing ?? null) as unknown as Prisma.InputJsonValue | null,
+    finalCta: (s.finalCta ?? null) as unknown as Prisma.InputJsonValue | null,
+    about: (s.about ?? null) as unknown as Prisma.InputJsonValue | null,
+    imageRoster: imageRoster as unknown as Prisma.InputJsonValue,
+  };
+
   await prisma.caseStudy.upsert({
     where: { contentItemId: item.id },
     create: {
@@ -254,6 +312,7 @@ async function publishCaseStudy(item: Item) {
       bodyMd: item.bodyMd,
       coverImagePath: cover.path,
       ...seoFields,
+      ...structuredFields,
     },
     update: {
       title: item.title,
@@ -262,6 +321,7 @@ async function publishCaseStudy(item: Item) {
       bodyMd: item.bodyMd,
       coverImagePath: cover.path,
       ...seoFields,
+      ...structuredFields,
     },
   });
 }

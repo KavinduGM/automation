@@ -257,6 +257,12 @@ export default async function BusinessDetail({
               </select>
               <button className="btn-primary text-xs">Draft one now (ASAP)</button>
             </form>
+            <a
+              href={`/businesses/${biz.slug}/new-case-study`}
+              className="btn-primary text-xs"
+            >
+              + New case study
+            </a>
           </div>
           <div className="mt-2 text-xs text-gray-500">
             <b>Run research now</b> kicks off all active Topic Sources for this business and adds new candidates. <b>Draft one now</b> creates a single ContentItem and publishes it ASAP, ignoring any time slots — slots are only honored by the per-minute scheduler tick.
