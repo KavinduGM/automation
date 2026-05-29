@@ -17,6 +17,9 @@ import {
   onAvatarReady,
   pollAvatarRender,
   runPostReview,
+  runShortScriptsFromBlog,
+  runShortVideoRender,
+  runShortVideoPublish,
 } from "@ca/pipelines";
 import { runDigestNow } from "./digest.js";
 
@@ -122,6 +125,28 @@ spawnWorker(QUEUES.post_review, async (job) => {
   const data = job.data as { contentItemId: string; publicUrl: string };
   return runPostReview(data);
 }, { concurrency: 2 });
+
+// ── Short-form video pipeline ────────────────────────────────────────────
+// Three queues:
+//   1. shortvideo_scripts — generate 5 scripts from a published blog
+//   2. shortvideo_render — call the renderer service (off-hours only,
+//      concurrency 1 to keep CPU + RAM headroom for the web stack)
+//   3. shortvideo_publish — upload to Drive + register with YT Automation
+
+spawnWorker(QUEUES.shortvideo_scripts, async (job) => {
+  const { contentItemId } = job.data as { contentItemId: string };
+  return runShortScriptsFromBlog(contentItemId);
+}, { concurrency: 1 });
+
+spawnWorker(QUEUES.shortvideo_render, async (job) => {
+  const { scriptId } = job.data as { scriptId: string };
+  return runShortVideoRender(scriptId);
+}, { concurrency: 1 });
+
+spawnWorker(QUEUES.shortvideo_publish, async (job) => {
+  const { scriptId } = job.data as { scriptId: string };
+  return runShortVideoPublish(scriptId);
+}, { concurrency: 1 });
 
 logger.info("worker.ready");
 

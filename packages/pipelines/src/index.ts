@@ -11,3 +11,6 @@ export * from "./landing-page.js";
 export * from "./webinar.js";
 export * from "./animate.js";
 export * from "./post-review.js";
+export * from "./short-video-scripts.js";
+export * from "./short-video-render.js";
+export * from "./short-video-publish.js";

@@ -6,3 +6,4 @@ export * from "./landing-page.js";
 export * from "./resource.js";
 export * from "./webinar.js";
 export * from "./critic.js";
+export * from "./short-video.js";

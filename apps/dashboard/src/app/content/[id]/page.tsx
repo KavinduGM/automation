@@ -192,6 +192,9 @@ export default async function ContentDetail({ params }: { params: { id: string }
             <h1 className="text-xl font-semibold">{item.title || "(untitled)"}</h1>
             <div className="text-xs text-gray-500">
               {item.business.name} · {item.type} · v{item.version} · cost ${item.costUsd.toFixed(2)}
+              {item.type === "blog" && (
+                <> · <a href={`/content/${params.id}/shorts`} className="text-brand-700 hover:underline">Short videos →</a></>
+              )}
               {item.scheduledAt && item.status === "scheduled" && (
                 <> · scheduled for <span className="font-medium">{item.scheduledAt.toISOString().replace("T", " ").slice(0, 16)} UTC</span></>
               )}

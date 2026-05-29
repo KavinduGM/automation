@@ -81,6 +81,21 @@ export async function publishContentItem(contentItemId: string): Promise<void> {
         logger.warn({ err, contentItemId }, "publish.post_review_enqueue_failed");
       }
     }
+
+    // Trigger short-video script generation if blog + business has a plan.
+    // Runs asynchronously via a queue so publish stays fast.
+    if (item.type === "blog") {
+      try {
+        await queue(QUEUES.shortvideo_scripts).add(
+          `scripts:${contentItemId}`,
+          { contentItemId },
+          { removeOnComplete: 500, removeOnFail: 100 },
+        );
+        logger.info({ contentItemId }, "publish.shortvideo_scripts_enqueued");
+      } catch (err) {
+        logger.warn({ err, contentItemId }, "publish.shortvideo_scripts_enqueue_failed");
+      }
+    }
   } catch (err) {
     logger.error({ err, contentItemId }, "publish.failed");
     await logStep(contentItemId, "publish", "failed", {

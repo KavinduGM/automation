@@ -206,6 +206,75 @@ model TopicCandidate {
   @@index([businessId, score])
 }
 
+// ── Short-form video automation ────────────────────────────────────────────
+// Each published blog can spawn N short scripts. Scripts get reviewed, then
+// rendered by the video-renderer service (HyperFrames pipeline ported from
+// the AI Video Creator desktop tool), then uploaded to the YT Automation
+// system as scheduled ContentItems with matching Drive filenames.
+
+model ShortVideoPlan {
+  id                String   @id @default(cuid())
+  businessId        String   @unique
+  business          Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  // How many shorts to generate per blog publish (1-10, default 5).
+  scriptsPerBlog    Int      @default(5)
+  // Whether script generation is auto-triggered after each blog publish.
+  autoGenerate      Boolean  @default(true)
+  // ElevenLabs voice ID to use for narration (cloned per business).
+  voiceId           String?
+  voiceName         String?
+  // Schedule cadence — slot times (HH:mm in plan timezone) for daily releases.
+  // Empty array = render but don't auto-schedule; admin chooses slot manually.
+  publishSlots      String[] @default([])
+  timezone          String   @default("America/New_York")
+  // Render window — only run video render jobs between these UTC hours.
+  // Default: 02:00-08:00 UTC = 10pm-4am US East (low web traffic).
+  renderWindowStartHourUtc Int @default(2)
+  renderWindowEndHourUtc   Int @default(8)
+  // The YT Automation channel filenamePrefix (e.g. "WEBX") — used to build
+  // the upload filename CHANNEL_DATE_TYPE_SLOT.mp4 their watcher expects.
+  ytChannelPrefix   String?
+  // YT Automation channel ID in the remote system; used to scope item creation.
+  ytChannelId       String?
+  updatedAt         DateTime @updatedAt
+}
+
+model ShortVideoScript {
+  id              String   @id @default(cuid())
+  // Source blog this script was derived from.
+  contentItemId   String
+  contentItem     ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  businessId      String
+  // 1..N within the blog (which of the 5 shorts is this).
+  ord             Int
+  // Status flow: pending_review → approved → rendering → rendered → uploading → scheduled → published → failed
+  status          String   @default("pending_review")
+  // The full script in the AI Video Creator parser shape (video_name, ratio,
+  // voice_profile, style, scenes[]). Stored as JSON so we can edit in-place.
+  script          Json
+  // Title / description / hashtags for YouTube publish.
+  title           String
+  description     String   @default("")
+  hashtags        String[] @default([])
+  tags            String[] @default([])
+  // When this short should publish on YouTube. Set by approve step.
+  scheduledPublishAt DateTime?
+  // Output paths once render finishes.
+  videoPath       String?
+  thumbnailPath   String?
+  // YT Automation ContentItem id once we POST to their API.
+  ytItemId        String?
+  // Cost rollup + last failure reason.
+  costUsd         Float    @default(0)
+  reviewNotes     String   @default("")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([businessId, status])
+  @@index([contentItemId, ord])
+  @@unique([contentItemId, ord])
+}
+
 // ── The pipeline core: ContentItem ─────────────────────────────────────────
 
 model ContentItem {

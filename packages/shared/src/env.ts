@@ -48,6 +48,13 @@ const schema = z.object({
 
   YT_AUTOMATION_API_URL: z.string().optional(),
   YT_AUTOMATION_API_TOKEN: z.string().optional(),
+  // Folder synced to Google Drive by rclone or similar — short videos drop here
+  // and the YT Automation watcher picks them up by filename match.
+  YT_DRIVE_DROP_DIR: z.string().optional(),
+
+  // Video renderer service.
+  VIDEO_RENDERER_URL: z.string().default("http://video-renderer:4100"),
+  RENDERER_AUTH_TOKEN: z.string().optional(),
 
   ASSETS_DIR: z.string().default("/app/assets"),
   TMP_DIR: z.string().default("/app/tmp"),

@@ -180,6 +180,34 @@ services:
     networks: [dokploy-network, default]
     restart: unless-stopped
 
+  # Video renderer (HyperFrames + ElevenLabs + Claude HTML + ffmpeg).
+  # Runs only off-hours via the worker's rate-limited shortvideo_render
+  # queue. Reachable from worker over the internal network at http://video-renderer:4100.
+  video-renderer:
+    build:
+      context: .
+      dockerfile: services/video-renderer/Dockerfile
+    environment:
+      PORT: 4100
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL_WRITING: ${ANTHROPIC_MODEL_WRITING:-claude-sonnet-4-6}
+      RENDERER_AUTH_TOKEN: ${RENDERER_AUTH_TOKEN:-}
+      ASSETS_DIR: /app/assets
+      HYPERFRAMES_COMMAND: npx hyperframes
+    volumes:
+      - assets:/app/assets
+      - tmp:/tmp
+    expose: ["4100"]
+    networks: [default]
+    restart: unless-stopped
+    # Memory cap so a runaway render can't OOM the worker / dashboard.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "1.5"
+
 networks:
   dokploy-network:
     external: true

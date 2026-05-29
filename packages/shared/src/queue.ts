@@ -29,6 +29,9 @@ export const QUEUES = {
   heygen_poll: "heygen_poll",   // self-rescheduling polling for HeyGen renders
   animate:     "animate",       // animated-webinar ffmpeg stitcher
   post_review: "post_review",   // post-publish live-page QA (delayed)
+  shortvideo_scripts: "shortvideo_scripts", // generate 5 shorts after each blog
+  shortvideo_render:  "shortvideo_render",  // call the renderer service (off-hours, concurrency 1)
+  shortvideo_publish: "shortvideo_publish", // upload to Drive + POST /items to YT Automation
 } as const;
 export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];
 

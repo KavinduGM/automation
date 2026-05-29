@@ -25,6 +25,7 @@ const OK_MESSAGES: Record<string, string> = {
   freshOff: "Fresh research disabled.",
   topicCandidateDeleted: "Topic deleted.",
   researchEnqueued: "Research job enqueued — check the Jobs page in a minute.",
+  shortVideoPlanSaved: "Short-video plan saved.",
   draftEnqueued: "Test draft enqueued — it will publish ASAP (slot ignored for test mode).",
 };
 
@@ -40,6 +41,7 @@ export default async function BusinessDetail({
     where: { slug: params.slug },
     include: { brandKit: true, contentPlans: true, topicSources: true, integrations: true },
   });
+  const shortVideoPlan = biz ? await prisma.shortVideoPlan.findUnique({ where: { businessId: biz.id } }) : null;
   if (!biz) notFound();
 
   // Pull time-sensitive / breaking topic candidates so the admin can
@@ -203,6 +205,50 @@ export default async function BusinessDetail({
     const id = String(formData.get("id"));
     await prisma.integration.delete({ where: { id } });
     redirect(`/businesses/${params.slug}?ok=integrationDeleted`);
+  }
+
+  async function saveShortVideoPlan(formData: FormData) {
+    "use server";
+    const business = await prisma.business.findUniqueOrThrow({ where: { slug: params.slug } });
+    const scriptsPerBlog = Math.max(1, Math.min(10, Number(formData.get("scriptsPerBlog") ?? 5)));
+    const autoGenerate = formData.get("autoGenerate") === "on";
+    const voiceId = String(formData.get("voiceId") ?? "").trim() || null;
+    const voiceName = String(formData.get("voiceName") ?? "").trim() || null;
+    const ytChannelPrefix = String(formData.get("ytChannelPrefix") ?? "").trim().toUpperCase() || null;
+    const ytChannelId = String(formData.get("ytChannelId") ?? "").trim() || null;
+    const renderWindowStartHourUtc = Math.max(0, Math.min(23, Number(formData.get("renderWindowStartHourUtc") ?? 2)));
+    const renderWindowEndHourUtc = Math.max(0, Math.min(23, Number(formData.get("renderWindowEndHourUtc") ?? 8)));
+    const publishSlots = String(formData.get("publishSlots") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => /^\d{1,2}:\d{2}$/.test(s));
+    await prisma.shortVideoPlan.upsert({
+      where: { businessId: business.id },
+      create: {
+        businessId: business.id,
+        scriptsPerBlog,
+        autoGenerate,
+        voiceId,
+        voiceName,
+        ytChannelPrefix,
+        ytChannelId,
+        renderWindowStartHourUtc,
+        renderWindowEndHourUtc,
+        publishSlots,
+      },
+      update: {
+        scriptsPerBlog,
+        autoGenerate,
+        voiceId,
+        voiceName,
+        ytChannelPrefix,
+        ytChannelId,
+        renderWindowStartHourUtc,
+        renderWindowEndHourUtc,
+        publishSlots,
+      },
+    });
+    redirect(`/businesses/${params.slug}?ok=shortVideoPlanSaved`);
   }
 
   async function runResearchNow() {
@@ -550,6 +596,57 @@ export default async function BusinessDetail({
               })}
             </div>
           )}
+        </section>
+
+        {/* ── Short-video plan ──────────────────────────────────────── */}
+        <section className="card">
+          <h2 className="font-medium mb-1">Short-video plan</h2>
+          <p className="text-xs text-gray-500 mb-3">
+            After every blog publishes, Claude generates N short scripts from it. You review/edit each on the article&apos;s <code>Shorts</code> tab, then approve. Renders run off-hours via HyperFrames + ElevenLabs and upload into the YT Automation system.
+          </p>
+          <form action={saveShortVideoPlan} className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="label">Scripts per blog</label>
+              <input className="input" type="number" name="scriptsPerBlog" min={1} max={10} defaultValue={shortVideoPlan?.scriptsPerBlog ?? 5} />
+            </div>
+            <label className="text-xs flex items-center gap-2 self-end pb-2">
+              <input type="checkbox" name="autoGenerate" defaultChecked={shortVideoPlan?.autoGenerate ?? true} /> auto-generate after blog publishes
+            </label>
+            <div>
+              <label className="label">ElevenLabs voice ID</label>
+              <input className="input font-mono text-xs" name="voiceId" defaultValue={shortVideoPlan?.voiceId ?? ""} placeholder="e.g. 21m00Tcm4TlvDq8ikWAM" />
+            </div>
+            <div>
+              <label className="label">Voice display name</label>
+              <input className="input" name="voiceName" defaultValue={shortVideoPlan?.voiceName ?? ""} placeholder="e.g. WebX-Founder" />
+            </div>
+            <div>
+              <label className="label">YT Automation channel prefix (3-6 caps)</label>
+              <input className="input font-mono text-xs uppercase" name="ytChannelPrefix" defaultValue={shortVideoPlan?.ytChannelPrefix ?? ""} placeholder="WEBX" />
+            </div>
+            <div>
+              <label className="label">YT Automation channel ID</label>
+              <input className="input font-mono text-xs" name="ytChannelId" defaultValue={shortVideoPlan?.ytChannelId ?? ""} placeholder="cuid from YT Automation /channels" />
+            </div>
+            <div>
+              <label className="label">Render window start (UTC hour)</label>
+              <input className="input" type="number" name="renderWindowStartHourUtc" min={0} max={23} defaultValue={shortVideoPlan?.renderWindowStartHourUtc ?? 2} />
+            </div>
+            <div>
+              <label className="label">Render window end (UTC hour)</label>
+              <input className="input" type="number" name="renderWindowEndHourUtc" min={0} max={23} defaultValue={shortVideoPlan?.renderWindowEndHourUtc ?? 8} />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="label">Publish slots (HH:mm comma-separated, in plan timezone)</label>
+              <input className="input" name="publishSlots" defaultValue={(shortVideoPlan?.publishSlots ?? []).join(", ")} placeholder="09:00, 13:00, 17:00, 21:00, 06:00" />
+              <div className="text-xs text-gray-500 mt-1">
+                Claude maps each generated script to a slot index. With 5 slots and 5 scripts, each blog spreads one short per slot per day.
+              </div>
+            </div>
+            <div className="sm:col-span-2">
+              <button className="btn-primary">Save short-video plan</button>
+            </div>
+          </form>
         </section>
 
         {/* ── Integrations ──────────────────────────────────────────── */}
