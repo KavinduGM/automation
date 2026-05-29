@@ -62,7 +62,7 @@ OUTPUT JSON only, this exact schema (counts are LOCKED):
     "heading":     string,       // 1-2 line question hook
     "intro":       string,       // 2-3 sentence frame
     "tiredOf":     string[],     // EXACTLY 5 short imperative outcomes ("Automate X", "Eliminate Y")
-    "tiredOfOutro":string,       // 1 sentence ("Then it's time to talk to ${brandName}.")
+    "tiredOfOutro":string,       // 1 sentence (e.g. "Then it's time to talk to <brand name from brand kit>.")
     "finalLine":   string        // 1-line closer ("Less X. More Y. Let's build it.")
   },
 
