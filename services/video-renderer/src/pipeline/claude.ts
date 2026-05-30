@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import fs from 'node:fs/promises'
 import type { AspectRatio, ScriptSpec } from '../types.js'
-import { dimensionsForRatio } from './parser'
+import { dimensionsForRatio } from './parser.js'
 
 export interface SceneRenderArgs {
   apiKey: string
