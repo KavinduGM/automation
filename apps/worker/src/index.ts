@@ -139,13 +139,13 @@ spawnWorker(QUEUES.shortvideo_scripts, async (job) => {
 }, { concurrency: 1 });
 
 spawnWorker(QUEUES.shortvideo_render, async (job) => {
-  const { scriptId } = job.data as { scriptId: string };
-  return runShortVideoRender(scriptId);
+  const { scriptId, testMode } = job.data as { scriptId: string; testMode?: boolean };
+  return runShortVideoRender(scriptId, { testMode: testMode === true });
 }, { concurrency: 1 });
 
 spawnWorker(QUEUES.shortvideo_publish, async (job) => {
-  const { scriptId } = job.data as { scriptId: string };
-  return runShortVideoPublish(scriptId);
+  const { scriptId, testMode } = job.data as { scriptId: string; testMode?: boolean };
+  return runShortVideoPublish(scriptId, { testMode: testMode === true });
 }, { concurrency: 1 });
 
 logger.info("worker.ready");

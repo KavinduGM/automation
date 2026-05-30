@@ -131,6 +131,10 @@ export interface UploadVideoArgs {
   // Shorts-friendly defaults. Most clients flip this on for vertical videos
   // ≤60 sec — YouTube auto-detects too but explicit is better.
   isShort?: boolean;
+  // Override privacy status. Default is "private" so publishAt can schedule.
+  // Set "unlisted" for test runs (instantly viewable via URL but not listed
+  // or searchable) or "public" to publish immediately.
+  privacyStatus?: "private" | "unlisted" | "public";
 }
 
 export interface UploadVideoResult {
@@ -147,8 +151,9 @@ export async function uploadVideo(args: UploadVideoArgs): Promise<UploadVideoRes
   const stream = createReadStream(args.videoFilePath) as Readable;
 
   // For scheduled publish, status MUST be "private". Once publishAt fires,
-  // YouTube flips it to "public" automatically.
-  const privacyStatus = "private";
+  // YouTube flips it to "public" automatically. Override (unlisted/public)
+  // is used for test runs and immediate publishes.
+  const privacyStatus = args.privacyStatus ?? "private";
 
   const res = await yt.videos.insert({
     part: ["snippet", "status"],

@@ -27,6 +27,9 @@ const OK_MESSAGES: Record<string, string> = {
   researchEnqueued: "Research job enqueued — check the Jobs page in a minute.",
   shortVideoPlanSaved: "Short-video plan saved.",
   draftEnqueued: "Test draft enqueued — it will publish ASAP (slot ignored for test mode).",
+  shortVideoTestStarted: "Test short-video pipeline started. Generating script → rendering → uploading unlisted. Watch progress on the article's Shorts tab.",
+  shortVideoTestNoBlog: "No published blog found for this business — publish at least one blog first, then click Test again.",
+  shortVideoTestNoChannel: "No YouTube channel connected as publish target. Connect one on the YouTube channels page first.",
 };
 
 export default async function BusinessDetail({
@@ -249,6 +252,60 @@ export default async function BusinessDetail({
       },
     });
     redirect(`/businesses/${params.slug}?ok=shortVideoPlanSaved`);
+  }
+
+  // Run the full short-video pipeline once against the latest published blog
+  // for this business — script gen → render (bypassing off-hours window) →
+  // upload as UNLISTED so admin can preview without going public. Use to
+  // verify the pipeline end-to-end before turning on the scheduled flow.
+  async function runShortVideoTestNow() {
+    "use server";
+    const business = await prisma.business.findUniqueOrThrow({ where: { slug: params.slug } });
+    const plan = await prisma.shortVideoPlan.findUnique({ where: { businessId: business.id } });
+    if (!plan?.youtubeChannelRowId) {
+      redirect(`/businesses/${params.slug}?ok=shortVideoTestNoChannel`);
+    }
+    // Pick the most recent published blog for this business.
+    const blog = await prisma.contentItem.findFirst({
+      where: { businessId: business.id, type: "blog", status: "published" },
+      orderBy: { publishedAt: "desc" },
+    });
+    if (!blog) {
+      redirect(`/businesses/${params.slug}?ok=shortVideoTestNoBlog`);
+    }
+    // Reuse an existing script if there is one for this blog (avoids burning
+    // Claude tokens on duplicate generation). Otherwise enqueue script
+    // generation, then wait for the worker to produce one.
+    let script = await prisma.shortVideoScript.findFirst({
+      where: { contentItemId: blog!.id },
+      orderBy: { ord: "asc" },
+    });
+    if (!script) {
+      await queue(QUEUES.shortvideo_scripts).add(
+        `scripts:${blog!.id}:test`,
+        { contentItemId: blog!.id },
+      );
+      // We can't synchronously wait for the script gen here (server actions
+      // shouldn't block on a worker). Tell the admin to click again after
+      // ~30s, by which point the script will exist.
+      redirect(
+        `/businesses/${params.slug}?ok=shortVideoTestStarted&note=${encodeURIComponent(
+          "Script being generated — wait ~30s, then click Test again to render+publish it.",
+        )}`,
+      );
+    }
+    // Flip the script to approved (skipping human review) and enqueue
+    // render with testMode=true. The render step bypasses the off-hours
+    // window and the publish step uploads UNLISTED with no schedule.
+    await prisma.shortVideoScript.update({
+      where: { id: script!.id },
+      data: { status: "approved", reviewNotes: "Queued via Test Now button — will upload as unlisted." },
+    });
+    await queue(QUEUES.shortvideo_render).add(
+      `render:${script!.id}:test`,
+      { scriptId: script!.id, testMode: true },
+    );
+    redirect(`/content/${blog!.id}/shorts?ok=shortVideoTestStarted`);
   }
 
   async function runResearchNow() {
@@ -650,6 +707,23 @@ export default async function BusinessDetail({
               <button className="btn-primary">Save short-video plan</button>
             </div>
           </form>
+
+          {/* Test-now lane: skips approval, ignores off-hours window, uploads UNLISTED */}
+          <div className="mt-4 pt-3 border-t border-gray-200">
+            <form action={runShortVideoTestNow}>
+              <button className="btn-ghost text-sm" type="submit">
+                ▶ Test now — render &amp; publish from latest blog
+              </button>
+              <p className="text-xs text-gray-500 mt-1">
+                One-click end-to-end test. Picks your latest published blog →
+                generates a script (if none exists yet) → renders immediately
+                (ignores off-hours window) → uploads as <b>unlisted</b> so you
+                can preview without going public. Watch progress on the article&apos;s
+                Shorts tab. Re-click after ~30s if the first click only enqueued
+                script generation.
+              </p>
+            </form>
+          </div>
         </section>
 
         {/* ── Integrations ──────────────────────────────────────────── */}

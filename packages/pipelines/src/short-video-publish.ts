@@ -21,7 +21,10 @@ import path from "node:path";
 // don't honor custom thumbnails anyway. When the long-video pipeline lands
 // we'll add brand-templated thumbnail generation + upload there.
 
-export async function runShortVideoPublish(scriptId: string): Promise<void> {
+export async function runShortVideoPublish(
+  scriptId: string,
+  opts: { testMode?: boolean } = {},
+): Promise<void> {
   const row = await prisma.shortVideoScript.findUnique({ where: { id: scriptId } });
   if (!row) {
     logger.warn({ scriptId }, "shortvideo.publish.row_missing");
@@ -58,7 +61,7 @@ export async function runShortVideoPublish(scriptId: string): Promise<void> {
 
   // ── Path A: NATIVE YouTube upload ─────────────────────────────────────
   if (plan.youtubeChannelRowId) {
-    await publishNative({ scriptId, row, plan, videoAbs });
+    await publishNative({ scriptId, row, plan, videoAbs, testMode: opts.testMode === true });
     return;
   }
 
@@ -79,8 +82,9 @@ async function publishNative(args: {
   row: Awaited<ReturnType<typeof prisma.shortVideoScript.findUnique>>;
   plan: Awaited<ReturnType<typeof prisma.shortVideoPlan.findUnique>>;
   videoAbs: string;
+  testMode: boolean;
 }): Promise<void> {
-  const { scriptId, row, plan, videoAbs } = args;
+  const { scriptId, row, plan, videoAbs, testMode } = args;
   if (!row || !plan?.youtubeChannelRowId) return;
 
   const ch = await prisma.youTubeChannel.findUnique({ where: { id: plan.youtubeChannelRowId } });
@@ -99,36 +103,44 @@ async function publishNative(args: {
   }
 
   // Compose YouTube description = body + hashtags on its own line.
-  const description = composeDescription(row.description, row.hashtags);
-  // scheduledPublishAt is the wall-clock instant YouTube flips the video
-  // from private → public. If we somehow don't have one, upload as private
-  // with no schedule (admin can flip it from YouTube Studio).
-  const publishAt = row.scheduledPublishAt ?? null;
+  const baseDescription = composeDescription(row.description, row.hashtags);
+  const description = testMode
+    ? `[TEST RUN — uploaded as unlisted for review]\n\n${baseDescription}`
+    : baseDescription;
+
+  // Test mode: upload as unlisted with NO schedule so you can preview
+  // immediately via the video URL without it being publicly listed or
+  // recommended. Normal flow: private + publishAt = the scheduled slot,
+  // YouTube auto-flips to public at that time.
+  const publishAt = testMode ? null : (row.scheduledPublishAt ?? null);
+  const privacyOverride = testMode ? "unlisted" : undefined;
 
   try {
     const upload = await uploadVideo({
       refreshToken,
       videoFilePath: videoAbs,
-      title: row.title,
+      title: testMode ? `[TEST] ${row.title}`.slice(0, 100) : row.title,
       description,
       tags: row.tags,
       publishAt,
+      privacyStatus: privacyOverride,
       categoryId: "22",         // People & Blogs — broad default for shorts
       defaultLanguage: "en",
       madeForKids: false,
       isShort: true,
     });
-    logger.info({ scriptId, videoId: upload.videoId, publishAt: upload.publishAt }, "shortvideo.publish.native_uploaded");
+    logger.info({ scriptId, videoId: upload.videoId, publishAt: upload.publishAt, testMode }, "shortvideo.publish.native_uploaded");
 
     // Shorts: no custom thumbnail uploaded — YouTube auto-generates one
     // from the first frame. (Long-video pipeline will set custom thumbs.)
 
+    const watchUrl = `https://youtu.be/${upload.videoId}`;
     await prisma.shortVideoScript.update({
       where: { id: scriptId },
       data: {
         status: "scheduled",
         ytItemId: upload.videoId,    // reuse this column to store YouTube videoId for native path
-        reviewNotes: "",
+        reviewNotes: testMode ? `TEST RUN ok — watch: ${watchUrl} (unlisted)` : "",
       },
     });
     // Update the channel's lastRefreshedAt — successful upload implies the

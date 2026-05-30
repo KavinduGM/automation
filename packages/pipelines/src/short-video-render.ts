@@ -21,7 +21,10 @@ interface RenderResponse {
 
 const RENDERER_URL = process.env.VIDEO_RENDERER_URL ?? "http://video-renderer:4100";
 
-export async function runShortVideoRender(scriptId: string): Promise<void> {
+export async function runShortVideoRender(
+  scriptId: string,
+  opts: { testMode?: boolean } = {},
+): Promise<void> {
   const row = await prisma.shortVideoScript.findUnique({ where: { id: scriptId } });
   if (!row) {
     logger.warn({ scriptId }, "shortvideo.render.row_missing");
@@ -34,8 +37,10 @@ export async function runShortVideoRender(scriptId: string): Promise<void> {
 
   // Off-hours window check. If we're outside it, requeue with a delay until
   // the next window start so the job sleeps quietly in BullMQ.
+  // Test mode bypasses the window entirely so admins can verify the
+  // pipeline end-to-end during business hours.
   const plan = await prisma.shortVideoPlan.findUnique({ where: { businessId: row.businessId } });
-  if (plan) {
+  if (plan && !opts.testMode) {
     const now = new Date();
     const utcHour = now.getUTCHours();
     const inWindow =
@@ -108,8 +113,12 @@ export async function runShortVideoRender(scriptId: string): Promise<void> {
       },
     });
 
-    // Auto-enqueue publish.
-    await queue(QUEUES.shortvideo_publish).add(`publish:${scriptId}`, { scriptId });
+    // Auto-enqueue publish — propagate testMode so the publish step uses
+    // unlisted privacy + no schedule.
+    await queue(QUEUES.shortvideo_publish).add(
+      `publish:${scriptId}${opts.testMode ? ":test" : ""}`,
+      { scriptId, testMode: opts.testMode === true },
+    );
     logger.info({ scriptId, duration: json.totalDurationSeconds }, "shortvideo.render.done");
   } catch (err) {
     logger.error({ err, scriptId }, "shortvideo.render.failed");
