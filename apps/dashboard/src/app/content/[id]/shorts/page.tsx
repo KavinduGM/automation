@@ -419,9 +419,24 @@ export default async function ShortsReviewPage({
                         </form>
                       </>
                     )}
-                    {(s.status === "approved" || s.status === "rendering") && (
+                    {s.status === "approved" && (
                       <span className="text-xs text-blue-700">
-                        Render queued — will run during {pad2(plan?.renderWindowStartHourUtc ?? 2)}:00-{pad2(plan?.renderWindowEndHourUtc ?? 8)}:00 UTC
+                        Queued — will start during {pad2(plan?.renderWindowStartHourUtc ?? 2)}:00-{pad2(plan?.renderWindowEndHourUtc ?? 8)}:00 UTC (or now if test mode)
+                      </span>
+                    )}
+                    {s.status === "rendering" && (
+                      <span className="text-xs text-purple-700 animate-pulse">
+                        ▶ Rendering — typically 5–10 min for 4 scenes. Watch Dokploy → video-renderer → Logs for live per-scene progress.
+                      </span>
+                    )}
+                    {s.status === "rendered" && (
+                      <span className="text-xs text-blue-700">
+                        Render done — upload in progress
+                      </span>
+                    )}
+                    {s.status === "uploading" && (
+                      <span className="text-xs text-purple-700 animate-pulse">
+                        ▶ Uploading to YouTube
                       </span>
                     )}
                     <form action={deleteOne}>
