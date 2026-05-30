@@ -1,4 +1,4 @@
-import { prisma, env, logger, open } from "@ca/shared";
+import { prisma, env, logger, open, isShortVideoDisabled } from "@ca/shared";
 import { uploadVideo, ytCreateItem, ytBuildExpectedFilename } from "@ca/providers";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -25,6 +25,10 @@ export async function runShortVideoPublish(
   scriptId: string,
   opts: { testMode?: boolean } = {},
 ): Promise<void> {
+  if (isShortVideoDisabled()) {
+    logger.info({ scriptId }, "shortvideo.publish.killed_by_env");
+    return;
+  }
   const row = await prisma.shortVideoScript.findUnique({ where: { id: scriptId } });
   if (!row) {
     logger.warn({ scriptId }, "shortvideo.publish.row_missing");

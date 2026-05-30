@@ -1,4 +1,4 @@
-import { prisma, logger, queue, QUEUES, type Prisma } from "@ca/shared";
+import { prisma, logger, queue, QUEUES, isShortVideoDisabled, type Prisma } from "@ca/shared";
 import { Prisma as PrismaRuntime } from "@prisma/client"; // for runtime constants like JsonNull
 import { schedulePost, revalidateForContent } from "@ca/providers";
 import { setStatus, logStep } from "./util.js";
@@ -84,16 +84,22 @@ export async function publishContentItem(contentItemId: string): Promise<void> {
 
     // Trigger short-video script generation if blog + business has a plan.
     // Runs asynchronously via a queue so publish stays fast.
+    // Hard-gated by SHORTVIDEO_DISABLED env so we don't waste Claude
+    // credits while the renderer is being migrated to a different host.
     if (item.type === "blog") {
-      try {
-        await queue(QUEUES.shortvideo_scripts).add(
-          `scripts:${contentItemId}`,
-          { contentItemId },
-          { removeOnComplete: 500, removeOnFail: 100 },
-        );
-        logger.info({ contentItemId }, "publish.shortvideo_scripts_enqueued");
-      } catch (err) {
-        logger.warn({ err, contentItemId }, "publish.shortvideo_scripts_enqueue_failed");
+      if (isShortVideoDisabled()) {
+        logger.info({ contentItemId }, "publish.shortvideo_scripts_skipped_killswitch");
+      } else {
+        try {
+          await queue(QUEUES.shortvideo_scripts).add(
+            `scripts:${contentItemId}`,
+            { contentItemId },
+            { removeOnComplete: 500, removeOnFail: 100 },
+          );
+          logger.info({ contentItemId }, "publish.shortvideo_scripts_enqueued");
+        } catch (err) {
+          logger.warn({ err, contentItemId }, "publish.shortvideo_scripts_enqueue_failed");
+        }
       }
     }
   } catch (err) {

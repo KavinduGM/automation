@@ -73,6 +73,14 @@ const schema = z.object({
   VIDEO_RENDERER_URL: z.string().default("http://video-renderer:4100"),
   RENDERER_AUTH_TOKEN: z.string().optional(),
 
+  // Short-video pipeline kill switch.
+  // Set to "true" or "1" to disable ALL Claude calls related to short
+  // videos: script generation, scene HTML generation, and visual review.
+  // Use while moving the render workload to a different host (e.g. a
+  // Mac mini) so we don't accidentally burn Claude credits on automated
+  // or manual triggers from the dashboard. Default = off.
+  SHORTVIDEO_DISABLED: z.string().optional().default(""),
+
   ASSETS_DIR: z.string().default("/app/assets"),
   TMP_DIR: z.string().default("/app/tmp"),
 
@@ -124,4 +132,16 @@ export function allowedLoginEmails(): string[] {
     .ALLOWED_LOGIN_EMAILS.split(",")
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
+}
+
+// Returns true when the short-video pipeline has been killed via env.
+// All Claude-touching code paths check this and refuse to proceed.
+// Setting the env var SHORTVIDEO_DISABLED=true (or 1) kills:
+//   - Auto-trigger of script generation after a blog publishes
+//   - Manual "Generate scripts now" from the Shorts page
+//   - "Test now" from the business page
+//   - Render and publish queue handlers (defense in depth)
+export function isShortVideoDisabled(): boolean {
+  const v = (env().SHORTVIDEO_DISABLED ?? "").toLowerCase().trim();
+  return v === "true" || v === "1" || v === "yes" || v === "on";
 }

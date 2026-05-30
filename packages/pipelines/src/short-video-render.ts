@@ -1,4 +1,4 @@
-import { prisma, env, logger, queue, QUEUES } from "@ca/shared";
+import { prisma, env, logger, queue, QUEUES, isShortVideoDisabled } from "@ca/shared";
 
 // Calls the video-renderer Docker service over HTTP. On success, stores
 // the returned video path + thumbnail on the ShortVideoScript row and
@@ -25,6 +25,20 @@ export async function runShortVideoRender(
   scriptId: string,
   opts: { testMode?: boolean } = {},
 ): Promise<void> {
+  if (isShortVideoDisabled()) {
+    logger.info({ scriptId }, "shortvideo.render.killed_by_env");
+    // Mark the row so the dashboard surfaces the reason instead of leaving
+    // it stuck in "approved" forever.
+    await prisma.shortVideoScript.updateMany({
+      where: { id: scriptId, status: { in: ["approved", "rendering"] } },
+      data: {
+        status: "failed",
+        reviewNotes:
+          "Render aborted: SHORTVIDEO_DISABLED env var is set (safety lock). Unset it in Dokploy and redeploy to re-enable, or wait for the renderer migration.",
+      },
+    });
+    return;
+  }
   const row = await prisma.shortVideoScript.findUnique({ where: { id: scriptId } });
   if (!row) {
     logger.warn({ scriptId }, "shortvideo.render.row_missing");

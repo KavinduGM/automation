@@ -1,4 +1,4 @@
-import { prisma, Prompts, logger, brandSiteFor, type Prisma } from "@ca/shared";
+import { prisma, Prompts, logger, brandSiteFor, isShortVideoDisabled, type Prisma } from "@ca/shared";
 import { claude } from "@ca/providers";
 import { bumpCost, logStep } from "./util.js";
 
@@ -34,6 +34,12 @@ export async function runShortScriptsFromBlog(
   contentItemId: string,
   opts: { force?: boolean } = {},
 ): Promise<void> {
+  if (isShortVideoDisabled()) {
+    logger.info({ contentItemId }, "shortvideo.scripts.killed_by_env");
+    throw new Error(
+      "Short-video pipeline is disabled via SHORTVIDEO_DISABLED env var (safety lock). Unset it in Dokploy and redeploy to re-enable.",
+    );
+  }
   const item = await prisma.contentItem.findUnique({
     where: { id: contentItemId },
     include: { business: true },

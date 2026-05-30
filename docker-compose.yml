@@ -86,6 +86,8 @@ services:
       # Native YouTube OAuth (per-business publish via YouTube Data API v3)
       GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
       GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      # Short-video pipeline kill switch — set to "true" to disable all Claude calls.
+      SHORTVIDEO_DISABLED: ${SHORTVIDEO_DISABLED:-}
       ASSETS_DIR: ${ASSETS_DIR}
       ASSETS_PUBLIC_URL: ${ASSETS_PUBLIC_URL}
       TMP_DIR: ${TMP_DIR}
@@ -140,6 +142,8 @@ services:
       # Video pipeline: shared secret + renderer URL (defaults to internal docker DNS)
       VIDEO_RENDERER_URL: ${VIDEO_RENDERER_URL:-http://video-renderer:4100}
       RENDERER_AUTH_TOKEN: ${RENDERER_AUTH_TOKEN:-}
+      # Short-video pipeline kill switch — set to "true" to disable all Claude calls.
+      SHORTVIDEO_DISABLED: ${SHORTVIDEO_DISABLED:-}
       ASSETS_DIR: ${ASSETS_DIR}
       TMP_DIR: ${TMP_DIR}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY}

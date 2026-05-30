@@ -1,4 +1,4 @@
-import { prisma, queue, QUEUES, type Prisma } from "@ca/shared";
+import { prisma, queue, QUEUES, isShortVideoDisabled, type Prisma } from "@ca/shared";
 import { runShortScriptsFromBlog } from "@ca/pipelines";
 import { requireUser } from "@/lib/auth";
 import { Nav } from "@/components/Nav";
@@ -56,6 +56,7 @@ export default async function ShortsReviewPage({
 
   const okMsg = searchParams?.ok ? OK_MESSAGES[searchParams.ok] : null;
   const errMsg = searchParams?.err ? decodeURIComponent(searchParams.err) : null;
+  const killSwitchOn = isShortVideoDisabled();
 
   // ────────────────────────────────────────────────────────────────────
   // Server actions
@@ -218,6 +219,20 @@ export default async function ShortsReviewPage({
           <p className="text-xs text-gray-500 mt-1">From: {item.title}</p>
         </div>
 
+        {killSwitchOn && (
+          <div className="rounded-md border border-orange-300 bg-orange-50 px-3 py-3 text-sm text-orange-900">
+            <b>🛑 Short-video pipeline is DISABLED.</b>
+            <div className="text-xs mt-1">
+              The <code>SHORTVIDEO_DISABLED</code> env var is set. All Claude calls
+              (script generation, scene HTML, visual review) are blocked. Render
+              and publish queue jobs are also no-ops. Edit, approve, and other
+              non-Claude actions still work for review.
+              <div className="mt-1">
+                To re-enable: unset <code>SHORTVIDEO_DISABLED</code> in Dokploy and redeploy.
+              </div>
+            </div>
+          </div>
+        )}
         {okMsg && (
           <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-800">
             {okMsg}
@@ -236,11 +251,15 @@ export default async function ShortsReviewPage({
             <h2 className="font-medium">Pipeline readiness</h2>
             <div className="flex gap-2">
               <form action={generateNow}>
-                <button className="btn-primary text-xs">▶ Generate scripts now</button>
+                <button className="btn-primary text-xs" disabled={killSwitchOn} title={killSwitchOn ? "Disabled — SHORTVIDEO_DISABLED env is set" : ""}>
+                  ▶ Generate scripts now
+                </button>
               </form>
               {scripts.length > 0 && (
                 <form action={regenerateAll}>
-                  <button className="btn-ghost text-xs">↻ Regenerate (delete + re-run)</button>
+                  <button className="btn-ghost text-xs" disabled={killSwitchOn} title={killSwitchOn ? "Disabled — SHORTVIDEO_DISABLED env is set" : ""}>
+                    ↻ Regenerate (delete + re-run)
+                  </button>
                 </form>
               )}
             </div>

@@ -1,4 +1,4 @@
-import { prisma, seal, open, queue, QUEUES } from "@ca/shared";
+import { prisma, seal, open, queue, QUEUES, isShortVideoDisabled } from "@ca/shared";
 import { requireUser } from "@/lib/auth";
 import { Nav } from "@/components/Nav";
 import { notFound, redirect } from "next/navigation";
@@ -694,6 +694,11 @@ export default async function BusinessDetail({
             <h2 className="font-medium">Short-video plan</h2>
             <a href={`/businesses/${biz.slug}/youtube`} className="text-xs text-brand-700 hover:underline">YouTube channels →</a>
           </div>
+          {isShortVideoDisabled() && (
+            <div className="rounded border border-orange-300 bg-orange-50 px-3 py-2 text-xs text-orange-900 mb-3">
+              🛑 <b>Pipeline DISABLED</b> via <code>SHORTVIDEO_DISABLED</code> env var. Plan settings can still be saved, but Claude calls (script generation, video render) are blocked to prevent accidental credit usage. Unset the env var in Dokploy to re-enable.
+            </div>
+          )}
           <p className="text-xs text-gray-500 mb-3">
             After every blog publishes, Claude generates N short scripts from it. You review/edit each on the article&apos;s <code>Shorts</code> tab, then approve. Renders run off-hours via HyperFrames + ElevenLabs and upload into the YT Automation system.
           </p>
@@ -744,7 +749,7 @@ export default async function BusinessDetail({
           {/* Test-now lane: skips approval, ignores off-hours window, uploads UNLISTED */}
           <div className="mt-4 pt-3 border-t border-gray-200">
             <form action={runShortVideoTestNow}>
-              <button className="btn-ghost text-sm" type="submit">
+              <button className="btn-ghost text-sm" type="submit" disabled={isShortVideoDisabled()} title={isShortVideoDisabled() ? "Disabled — SHORTVIDEO_DISABLED env is set" : ""}>
                 ▶ Test now — render &amp; publish from latest blog
               </button>
               <p className="text-xs text-gray-500 mt-1">
