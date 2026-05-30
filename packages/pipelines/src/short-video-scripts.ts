@@ -158,6 +158,7 @@ function computeNextSlotInstant(
   if (!slots || slots.length === 0) return null;
   const safeIdx = ((slotIdx % slots.length) + slots.length) % slots.length;
   const slot = slots[safeIdx];
+  if (!slot) return null;
   const match = /^(\d{1,2}):(\d{2})$/.exec(slot.trim());
   if (!match) return null;
   const hour = Number(match[1]);
