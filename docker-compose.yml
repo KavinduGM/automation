@@ -212,10 +212,13 @@ services:
     networks: [default]
     restart: unless-stopped
     # Memory cap so a runaway render can't OOM the worker / dashboard.
+    # 4g is the practical minimum: headless Chromium alone needs ~2g for a
+    # complex animated page, plus ffmpeg + Node + Claude responses in RAM.
+    # 2g was killing the render with SIGKILL (exit code 137) mid-frame.
     deploy:
       resources:
         limits:
-          memory: 2g
+          memory: 4g
           cpus: "1.5"
 
 networks:

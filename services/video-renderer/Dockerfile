@@ -1,7 +1,7 @@
 # Video renderer service.
 #
 # Bundles:
-#   - Node 20 + Fastify HTTP API
+#   - Node 22 + Fastify HTTP API (Hyperframes >=0.6.62 requires Node >=22)
 #   - ffmpeg (via ffmpeg-static, no system install)
 #   - HeyGen Hyperframes CLI (installed via `npx skills add heygen-com/hyperframes`)
 #   - Headless Chromium (Hyperframes ships its own renderer; if it requires
@@ -10,7 +10,7 @@
 # Note: this image is BIG (~1.5GB) because of Chromium. Build it once and
 # reuse via Docker layer cache.
 
-FROM node:20-bookworm-slim
+FROM node:22-bookworm-slim
 
 # System deps for headless Chrome (Hyperframes uses Puppeteer under the hood).
 # Skip apt-get clean of /var/lib/apt/lists/* to allow `apt-get` again later
