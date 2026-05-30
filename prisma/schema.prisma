@@ -70,6 +70,8 @@ model Business {
   landingPages     LandingPage[]
   socialPosts      SocialPost[]
   auditLogs        AuditLog[]
+  shortVideoPlan   ShortVideoPlan?
+  youtubeChannels  YouTubeChannel[]
 }
 
 model BrandKit {
@@ -352,6 +354,9 @@ model ContentItem {
 
   // Step-level pipeline event trail for the dashboard timeline.
   pipelineEvents       PipelineEvent[]
+
+  // Short-form video scripts generated from this content item (blogs only).
+  shortVideoScripts    ShortVideoScript[]
 
   @@index([businessId, type, status])
   @@index([businessId, scheduledAt])
