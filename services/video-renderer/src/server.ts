@@ -66,10 +66,19 @@ app.post('/render', async (request, reply) => {
     return
   }
 
+  // The worker sends `spec` as a parsed JS object (from the
+  // ShortVideoScript.script JSON column). The parser wants a string
+  // (YAML/JSON). JSON is a strict YAML subset, so stringifying the
+  // object produces valid YAML for the parser.
+  const specInput =
+    typeof body.spec === 'string'
+      ? body.spec
+      : JSON.stringify(body.spec)
+
   // Validate the spec via the ported AI Video Creator parser.
   let spec
   try {
-    spec = parseScript(body.spec)
+    spec = parseScript(specInput)
   } catch (err) {
     reply.code(400).send({ error: `invalid spec: ${(err as Error).message}` })
     return

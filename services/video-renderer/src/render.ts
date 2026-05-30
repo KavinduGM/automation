@@ -124,7 +124,8 @@ export async function renderScript(input: RenderJobInput): Promise<RenderJobOutp
         visualFeedback,
       })
       html = htmlRes.html
-      claudeCostUsd += htmlRes.costUsd
+      // claude.ts doesn't currently surface per-call token cost; track separately
+      // via Anthropic dashboard. Leaving the breakdown field for future wiring.
 
       // 3. Hyperframes render
       const projectDir = path.join(sceneDir, `attempt_${attempt}`)
@@ -155,10 +156,9 @@ export async function renderScript(input: RenderJobInput): Promise<RenderJobOutp
           model: input.claudeModel ?? 'claude-sonnet-4-6',
           framePath,
           explainer: scene.explainer,
-          voiceover: scene.voiceover,
           ratio: input.spec.ratio,
         })
-        visualReviewCostUsd += review.costUsd
+        // review cost not tracked here; see Anthropic dashboard.
         lastReviewIssues = review.issues ?? []
         if (review.pass) {
           log(`[scene ${i + 1}] visual review passed`)
