@@ -37,7 +37,7 @@ export default async function BusinessDetail({
   searchParams,
 }: {
   params: { slug: string };
-  searchParams?: { ok?: string; editPlan?: string; editTopic?: string; editInt?: string };
+  searchParams?: { ok?: string; editPlan?: string; editTopic?: string; editInt?: string; note?: string; testErr?: string };
 }) {
   await requireUser();
   const biz = await prisma.business.findUnique({
