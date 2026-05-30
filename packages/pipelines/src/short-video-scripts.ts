@@ -30,27 +30,41 @@ interface GeneratedScript {
   };
 }
 
-export async function runShortScriptsFromBlog(contentItemId: string): Promise<void> {
+export async function runShortScriptsFromBlog(
+  contentItemId: string,
+  opts: { force?: boolean } = {},
+): Promise<void> {
   const item = await prisma.contentItem.findUnique({
     where: { id: contentItemId },
     include: { business: true },
   });
   if (!item || item.type !== "blog") {
     logger.info({ contentItemId, type: item?.type }, "shortvideo.skipped_not_blog");
-    return;
+    throw new Error(`Content item ${contentItemId} is not a blog (type=${item?.type ?? "missing"})`);
   }
 
   const plan = await prisma.shortVideoPlan.findUnique({ where: { businessId: item.businessId } });
-  if (!plan || !plan.autoGenerate) {
-    logger.info({ contentItemId, businessId: item.businessId }, "shortvideo.skipped_no_plan_or_autogen_off");
-    return;
+  if (!plan) {
+    logger.info({ contentItemId, businessId: item.businessId }, "shortvideo.skipped_no_plan");
+    throw new Error(
+      "No ShortVideoPlan configured for this business. Open the business page → Short-video plan section → fill it in.",
+    );
+  }
+  // Auto-trigger only when autoGenerate is on. Manual triggers (force=true)
+  // bypass the gate so an admin can always kick off generation by hand.
+  if (!plan.autoGenerate && !opts.force) {
+    logger.info({ contentItemId, businessId: item.businessId }, "shortvideo.skipped_autogen_off");
+    throw new Error(
+      "ShortVideoPlan.autoGenerate is OFF. Enable it on the business page, or click 'Generate scripts now' which forces a run.",
+    );
   }
 
-  // Skip if scripts already generated for this blog (idempotent re-run safety).
+  // Skip if scripts already generated for this blog (idempotent re-run
+  // safety). Manual triggers (force=true) bypass this.
   const existing = await prisma.shortVideoScript.count({ where: { contentItemId } });
-  if (existing >= plan.scriptsPerBlog) {
+  if (existing >= plan.scriptsPerBlog && !opts.force) {
     logger.info({ contentItemId, existing }, "shortvideo.skipped_already_generated");
-    return;
+    throw new Error(`Already have ${existing} script(s) for this blog. Use 'Regenerate' to replace them.`);
   }
 
   await logStep(contentItemId, "shortvideo_scripts", "started", {

@@ -134,8 +134,8 @@ spawnWorker(QUEUES.post_review, async (job) => {
 //   3. shortvideo_publish — upload to Drive + register with YT Automation
 
 spawnWorker(QUEUES.shortvideo_scripts, async (job) => {
-  const { contentItemId } = job.data as { contentItemId: string };
-  return runShortScriptsFromBlog(contentItemId);
+  const { contentItemId, force } = job.data as { contentItemId: string; force?: boolean };
+  return runShortScriptsFromBlog(contentItemId, { force: force === true });
 }, { concurrency: 1 });
 
 spawnWorker(QUEUES.shortvideo_render, async (job) => {
