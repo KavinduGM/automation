@@ -79,6 +79,12 @@ export async function runShortVideoRender(
     return;
   }
 
+  // The script JSON stored on the row carries our internal _meta field
+  // (title/description/hashtags/etc.) which the renderer's strict YAML
+  // parser would reject as an unknown top-level key. Strip it before
+  // sending — the renderer only needs the actual spec fields.
+  const cleanSpec = stripMeta(row.script);
+
   let res: Response;
   try {
     res = await fetch(`${RENDERER_URL}/render`, {
@@ -88,7 +94,7 @@ export async function runShortVideoRender(
         ...(process.env.RENDERER_AUTH_TOKEN ? { "X-Renderer-Token": process.env.RENDERER_AUTH_TOKEN } : {}),
       },
       body: JSON.stringify({
-        spec: row.script,
+        spec: cleanSpec,
         voiceId,
         outputDir: outputRel,
         visualReviewMaxAttempts: 2,
@@ -141,6 +147,18 @@ export async function runShortVideoRender(
       data: { status: "failed", reviewNotes: (err as Error).message ?? String(err) },
     });
   }
+}
+
+// Drop the internal `_meta` field (title/description/hashtags/tags/
+// suggestedSlotIdx) from the spec so the renderer's strict allowlist
+// parser doesn't reject the whole payload. `_meta` is for the publish
+// step, not the render step.
+function stripMeta(script: unknown): unknown {
+  if (!script || typeof script !== "object") return script;
+  // Shallow strip — _meta lives at the top level, not inside scenes.
+  const { _meta: _drop, ...rest } = script as Record<string, unknown>;
+  void _drop;
+  return rest;
 }
 
 // Milliseconds until the next occurrence of HH:00 UTC.
