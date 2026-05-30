@@ -46,11 +46,28 @@ const schema = z.object({
   REDDIT_CLIENT_SECRET: z.string().optional(),
   REDDIT_USER_AGENT: z.string().default("content-automation/0.1"),
 
+  // ── LEGACY YT Automation handoff (kept for the OAP/OAG/NUR education
+  // channels that still use the original tool; the WEBX agency flow uses
+  // the native YouTube path below). Safe to leave unset for new businesses.
   YT_AUTOMATION_API_URL: z.string().optional(),
   YT_AUTOMATION_API_TOKEN: z.string().optional(),
-  // Folder synced to Google Drive by rclone or similar — short videos drop here
-  // and the YT Automation watcher picks them up by filename match.
   YT_DRIVE_DROP_DIR: z.string().optional(),
+
+  // ── Native YouTube publish (replaces the YT Automation hop for short
+  // videos). One OAuth app handles all businesses; per-channel refresh
+  // tokens are stored on YouTubeChannel rows.
+  //
+  // Setup:
+  //  1. Google Cloud Console → APIs & Services → OAuth consent screen
+  //     - User type: Internal if you have Workspace (NO 7-day expiry, no
+  //       verification needed). Otherwise External + add yourself as test
+  //       user (7-day refresh-token expiry until verified).
+  //     - Scopes: youtube, youtube.upload, youtube.readonly
+  //  2. Credentials → Create OAuth client → Web application
+  //     - Authorized redirect URI: ${DASHBOARD_URL}/api/youtube/oauth/callback
+  //  3. Copy client id + secret here.
+  GOOGLE_OAUTH_CLIENT_ID: z.string().optional(),
+  GOOGLE_OAUTH_CLIENT_SECRET: z.string().optional(),
 
   // Video renderer service.
   VIDEO_RENDERER_URL: z.string().default("http://video-renderer:4100"),

@@ -233,10 +233,50 @@ model ShortVideoPlan {
   renderWindowEndHourUtc   Int @default(8)
   // The YT Automation channel filenamePrefix (e.g. "WEBX") — used to build
   // the upload filename CHANNEL_DATE_TYPE_SLOT.mp4 their watcher expects.
+  // LEGACY: only used by the YT-Automation-tool path; native publish ignores this.
   ytChannelPrefix   String?
   // YT Automation channel ID in the remote system; used to scope item creation.
+  // LEGACY: only used by the YT-Automation-tool path; native publish ignores this.
   ytChannelId       String?
+  // Native YouTube path: pointer to a YouTubeChannel row this business
+  // publishes to. When set, the publish step uploads via the YouTube Data API
+  // directly and bypasses YT_DRIVE_DROP_DIR + the YT Automation tool entirely.
+  youtubeChannelRowId String?
   updatedAt         DateTime @updatedAt
+}
+
+// YouTube OAuth credential per business → channel. The native publish path
+// uses these to upload videos directly via the YouTube Data API v3, replacing
+// the previous YT-Automation-tool + rclone hop. Tokens are AES-256-GCM
+// encrypted with the same seal() helper used for Integration tokens.
+//
+// One business can have multiple connected channels — but ShortVideoPlan
+// only references one at a time via youtubeChannelId.
+model YouTubeChannel {
+  id                 String   @id @default(cuid())
+  businessId         String
+  business           Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  // YouTube channel identifiers — copied from the user's Google account at
+  // connection time so we don't have to round-trip every upload.
+  youtubeChannelId   String   @unique  // e.g. "UCxxxxxxxxxxxxxxxxxxx"
+  channelTitle       String              // "GroovyMark WebX"
+  channelHandle      String?             // "@groovymarkwebx" if available
+  // OAuth refresh token, encrypted at rest.
+  refreshTokenCipher String
+  refreshTokenIv     String
+  refreshTokenTag    String
+  // Space-separated scope list, e.g. "https://www.googleapis.com/auth/youtube.upload …"
+  scopes             String
+  // When Google last granted us a fresh access token via this refresh token.
+  lastRefreshedAt    DateTime?
+  // Set when a refresh fails (token revoked, expired, or scope removed). Once
+  // populated, the dashboard nags the admin to re-connect.
+  refreshError       String?
+  refreshErrorAt     DateTime?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([businessId])
 }
 
 model ShortVideoScript {

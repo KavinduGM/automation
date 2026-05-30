@@ -600,7 +600,10 @@ export default async function BusinessDetail({
 
         {/* ── Short-video plan ──────────────────────────────────────── */}
         <section className="card">
-          <h2 className="font-medium mb-1">Short-video plan</h2>
+          <div className="flex items-baseline justify-between mb-1">
+            <h2 className="font-medium">Short-video plan</h2>
+            <a href={`/businesses/${biz.slug}/youtube`} className="text-xs text-brand-700 hover:underline">YouTube channels →</a>
+          </div>
           <p className="text-xs text-gray-500 mb-3">
             After every blog publishes, Claude generates N short scripts from it. You review/edit each on the article&apos;s <code>Shorts</code> tab, then approve. Renders run off-hours via HyperFrames + ElevenLabs and upload into the YT Automation system.
           </p>

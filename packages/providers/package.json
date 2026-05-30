@@ -17,6 +17,7 @@
     "openai": "^4.71.0",
     "@aws-sdk/client-s3": "^3.654.0",
     "resend": "^4.0.0",
+    "googleapis": "^144.0.0",
     "@ca/shared": "*"
   },
   "devDependencies": {

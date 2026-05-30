@@ -18,5 +18,6 @@ export {
   type YtChannelCreateInput,
   type YtItemCreateInput,
 } from "./yt-automation.js";
+export * from "./youtube.js";
 export * from "./storage.js";
 export * from "./site-revalidate.js";

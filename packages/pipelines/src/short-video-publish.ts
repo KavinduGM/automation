@@ -1,21 +1,20 @@
-import { prisma, env, logger } from "@ca/shared";
-import { ytCreateItem, ytBuildExpectedFilename } from "@ca/providers";
+import { prisma, env, logger, open } from "@ca/shared";
+import { uploadVideo, setThumbnail, ytCreateItem, ytBuildExpectedFilename } from "@ca/providers";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-// Uploads the rendered MP4 + thumbnail into the YT Automation system's
-// Drive folder and registers a scheduled ContentItem with their API.
+// Publishes a rendered short to YouTube. Two paths supported:
 //
-// Two integration strategies depending on env config:
-//   A. YT_DRIVE_DROP_DIR set: write the files to a local directory that
-//      is rclone-synced to Drive by ops. Lowest-friction; no Google
-//      OAuth needed on the automation side. RECOMMENDED.
-//   B. YT_DRIVE_API_ENABLED: use a Google service account or shared
-//      refresh token to upload via the Drive REST API. Future-friendly
-//      but needs OAuth plumbing.
+//   A. NATIVE (recommended) — plan.youtubeChannelRowId is set.
+//      Read the encrypted refresh token, upload via YouTube Data API v3
+//      with scheduled publishAt, set custom thumbnail, store videoId.
+//      Replaces the previous Drive-drop + YT Automation hop entirely.
 //
-// Either way, the YT Automation watcher picks up the files by name
-// match and proceeds with its existing approval + upload flow.
+//   B. LEGACY — plan.ytChannelPrefix + plan.ytChannelId are set (and the
+//      YT Automation env vars are configured). Drops MP4 into Drive sync
+//      folder + creates a ContentItem in the YT Automation system.
+//      Kept for the OAP/OAG/NUR education channels that still use the
+//      original tool.
 
 export async function runShortVideoPublish(scriptId: string): Promise<void> {
   const row = await prisma.shortVideoScript.findUnique({ where: { id: scriptId } });
@@ -28,34 +27,154 @@ export async function runShortVideoPublish(scriptId: string): Promise<void> {
     return;
   }
   if (!row.videoPath) {
-    await prisma.shortVideoScript.update({
-      where: { id: scriptId },
-      data: { status: "failed", reviewNotes: "No videoPath — render did not complete" },
-    });
+    await markFailed(scriptId, "No videoPath — render did not complete");
     return;
   }
 
   const plan = await prisma.shortVideoPlan.findUnique({ where: { businessId: row.businessId } });
-  if (!plan?.ytChannelPrefix || !plan.ytChannelId) {
-    await prisma.shortVideoScript.update({
-      where: { id: scriptId },
-      data: {
-        status: "failed",
-        reviewNotes:
-          "Missing ytChannelPrefix or ytChannelId on the business video plan — set them on the dashboard so the upload can target the right channel.",
-      },
-    });
+  if (!plan) {
+    await markFailed(scriptId, "No ShortVideoPlan configured for this business");
     return;
   }
 
-  await prisma.shortVideoScript.update({
-    where: { id: scriptId },
-    data: { status: "uploading" },
-  });
+  // Resolve absolute paths to the rendered files.
+  const assetsDir = env().ASSETS_DIR;
+  const videoAbs = path.isAbsolute(row.videoPath) ? row.videoPath : path.join(assetsDir, row.videoPath);
+  const thumbAbs = row.thumbnailPath
+    ? (path.isAbsolute(row.thumbnailPath) ? row.thumbnailPath : path.join(assetsDir, row.thumbnailPath))
+    : null;
 
+  // Sanity: file must exist before we tell YouTube about it.
+  try {
+    await fs.access(videoAbs);
+  } catch {
+    await markFailed(scriptId, `Rendered video missing on disk at ${videoAbs}`);
+    return;
+  }
+
+  await prisma.shortVideoScript.update({ where: { id: scriptId }, data: { status: "uploading" } });
+
+  // ── Path A: NATIVE YouTube upload ─────────────────────────────────────
+  if (plan.youtubeChannelRowId) {
+    await publishNative({ scriptId, row, plan, videoAbs, thumbAbs });
+    return;
+  }
+
+  // ── Path B: LEGACY YT Automation handoff ──────────────────────────────
+  if (plan.ytChannelPrefix && plan.ytChannelId) {
+    await publishLegacy({ scriptId, row, plan, videoAbs, thumbAbs });
+    return;
+  }
+
+  await markFailed(
+    scriptId,
+    "Neither youtubeChannelRowId (native path) nor ytChannelPrefix+ytChannelId (legacy path) configured on the business plan — open the business page → Short-video plan and connect a YouTube channel.",
+  );
+}
+
+async function publishNative(args: {
+  scriptId: string;
+  row: Awaited<ReturnType<typeof prisma.shortVideoScript.findUnique>>;
+  plan: Awaited<ReturnType<typeof prisma.shortVideoPlan.findUnique>>;
+  videoAbs: string;
+  thumbAbs: string | null;
+}): Promise<void> {
+  const { scriptId, row, plan, videoAbs, thumbAbs } = args;
+  if (!row || !plan?.youtubeChannelRowId) return;
+
+  const ch = await prisma.youTubeChannel.findUnique({ where: { id: plan.youtubeChannelRowId } });
+  if (!ch) {
+    await markFailed(scriptId, "Configured YouTube channel row not found (was it disconnected?)");
+    return;
+  }
+
+  // Decrypt the refresh token.
+  let refreshToken: string;
+  try {
+    refreshToken = open({ cipher: ch.refreshTokenCipher, iv: ch.refreshTokenIv, tag: ch.refreshTokenTag });
+  } catch (err) {
+    await markFailed(scriptId, `Failed to decrypt YouTube refresh token: ${(err as Error).message}`);
+    return;
+  }
+
+  // Compose YouTube description = body + hashtags on its own line.
+  const description = composeDescription(row.description, row.hashtags);
+  // scheduledPublishAt is the wall-clock instant YouTube flips the video
+  // from private → public. If we somehow don't have one, upload as private
+  // with no schedule (admin can flip it from YouTube Studio).
+  const publishAt = row.scheduledPublishAt ?? null;
+
+  try {
+    const upload = await uploadVideo({
+      refreshToken,
+      videoFilePath: videoAbs,
+      title: row.title,
+      description,
+      tags: row.tags,
+      publishAt,
+      categoryId: "22",         // People & Blogs — broad default for shorts
+      defaultLanguage: "en",
+      madeForKids: false,
+      isShort: true,
+    });
+    logger.info({ scriptId, videoId: upload.videoId, publishAt: upload.publishAt }, "shortvideo.publish.native_uploaded");
+
+    // Try to set a custom thumbnail — non-fatal on failure (shorts can
+    // refuse custom thumbs on new channels; YouTube auto-generates one
+    // from the first frame as a fallback).
+    let thumbNote = "";
+    if (thumbAbs) {
+      try {
+        await fs.access(thumbAbs);
+        const r = await setThumbnail({ refreshToken, videoId: upload.videoId, thumbnailFilePath: thumbAbs });
+        if (!r.ok) thumbNote = `Thumbnail upload skipped: ${r.message ?? "unknown"}`;
+      } catch (err) {
+        thumbNote = `Thumbnail not uploaded: ${(err as Error).message}`;
+      }
+    }
+
+    await prisma.shortVideoScript.update({
+      where: { id: scriptId },
+      data: {
+        status: "scheduled",
+        ytItemId: upload.videoId,    // reuse this column to store YouTube videoId for native path
+        reviewNotes: thumbNote,
+      },
+    });
+    // Update the channel's lastRefreshedAt — successful upload implies the
+    // refresh token still works.
+    await prisma.youTubeChannel.update({
+      where: { id: ch.id },
+      data: { lastRefreshedAt: new Date(), refreshError: null, refreshErrorAt: null },
+    });
+  } catch (err) {
+    const msg = (err as Error).message ?? String(err);
+    logger.error({ err, scriptId, channelId: ch.youtubeChannelId }, "shortvideo.publish.native_failed");
+
+    // If the error looks like a token problem, mark the channel as needing
+    // reconnection so the dashboard nags the admin.
+    if (looksLikeAuthError(msg)) {
+      await prisma.youTubeChannel.update({
+        where: { id: ch.id },
+        data: { refreshError: msg.slice(0, 500), refreshErrorAt: new Date() },
+      });
+    }
+    await markFailed(scriptId, msg);
+  }
+}
+
+// Legacy path kept verbatim (Drive drop + YT Automation /items).
+async function publishLegacy(args: {
+  scriptId: string;
+  row: NonNullable<Awaited<ReturnType<typeof prisma.shortVideoScript.findUnique>>>;
+  plan: NonNullable<Awaited<ReturnType<typeof prisma.shortVideoPlan.findUnique>>>;
+  videoAbs: string;
+  thumbAbs: string | null;
+}): Promise<void> {
+  const { scriptId, row, plan, videoAbs, thumbAbs } = args;
   const scheduledAt = row.scheduledPublishAt ?? new Date(Date.now() + 24 * 60 * 60 * 1000);
   const expectedFilename = ytBuildExpectedFilename({
-    prefix: plan.ytChannelPrefix,
+    prefix: plan.ytChannelPrefix!,
     date: scheduledAt,
     type: "short",
     slot: row.ord,
@@ -63,43 +182,24 @@ export async function runShortVideoPublish(scriptId: string): Promise<void> {
   });
   const expectedThumb = expectedFilename.replace(/\.mp4$/, ".jpg");
 
-  // ── Strategy A: copy into the local Drive drop dir ─────────────────────
   const dropDir = process.env.YT_DRIVE_DROP_DIR;
   if (dropDir) {
     try {
-      const assetsDir = env().ASSETS_DIR;
-      const srcVideo = path.isAbsolute(row.videoPath) ? row.videoPath : path.join(assetsDir, row.videoPath);
-      const srcThumb = row.thumbnailPath
-        ? path.isAbsolute(row.thumbnailPath) ? row.thumbnailPath : path.join(assetsDir, row.thumbnailPath)
-        : null;
-
-      const target = path.join(dropDir, plan.ytChannelPrefix);
+      const target = path.join(dropDir, plan.ytChannelPrefix!);
       await fs.mkdir(target, { recursive: true });
-      await fs.copyFile(srcVideo, path.join(target, expectedFilename));
-      if (srcThumb) {
-        try {
-          await fs.copyFile(srcThumb, path.join(target, expectedThumb));
-        } catch (err) {
-          logger.warn({ err, scriptId }, "shortvideo.publish.thumbnail_copy_failed");
-        }
+      await fs.copyFile(videoAbs, path.join(target, expectedFilename));
+      if (thumbAbs) {
+        try { await fs.copyFile(thumbAbs, path.join(target, expectedThumb)); } catch { /* non-fatal */ }
       }
-      logger.info({ scriptId, expectedFilename }, "shortvideo.publish.dropped_for_drive_sync");
     } catch (err) {
-      logger.error({ err, scriptId }, "shortvideo.publish.drop_failed");
-      await prisma.shortVideoScript.update({
-        where: { id: scriptId },
-        data: { status: "failed", reviewNotes: `Drop to drive folder failed: ${(err as Error).message}` },
-      });
+      await markFailed(scriptId, `Drop to drive folder failed: ${(err as Error).message}`);
       return;
     }
-  } else {
-    logger.warn({ scriptId }, "shortvideo.publish.no_drive_drop_dir — set YT_DRIVE_DROP_DIR or implement strategy B");
   }
 
-  // ── Always POST /items to YT Automation so its watcher knows what to match ──
   try {
     const item = await ytCreateItem({
-      channelId: plan.ytChannelId,
+      channelId: plan.ytChannelId!,
       type: "short",
       expectedFilename,
       title: row.title,
@@ -109,27 +209,37 @@ export async function runShortVideoPublish(scriptId: string): Promise<void> {
       source: "automation",
       sourceRef: row.id,
     });
-
     await prisma.shortVideoScript.update({
       where: { id: scriptId },
       data: { status: "scheduled", ytItemId: item.id, reviewNotes: "" },
     });
-    logger.info({ scriptId, ytItemId: item.id, expectedFilename }, "shortvideo.publish.scheduled");
   } catch (err) {
-    logger.error({ err, scriptId }, "shortvideo.publish.yt_register_failed");
-    await prisma.shortVideoScript.update({
-      where: { id: scriptId },
-      data: {
-        status: "failed",
-        reviewNotes: `YT Automation register failed: ${(err as Error).message}`,
-      },
-    });
+    await markFailed(scriptId, `YT Automation register failed: ${(err as Error).message}`);
   }
 }
 
-// Build the YouTube description string from the saved description + hashtags.
+async function markFailed(scriptId: string, reason: string): Promise<void> {
+  await prisma.shortVideoScript.update({
+    where: { id: scriptId },
+    data: { status: "failed", reviewNotes: reason.slice(0, 4000) },
+  });
+}
+
 function composeDescription(desc: string, hashtags: string[]): string {
   const tail = (hashtags ?? []).filter(Boolean).join(" ");
   if (!tail) return desc;
   return `${desc.trim()}\n\n${tail}`;
+}
+
+// Recognize OAuth refresh-token failures. We use this to flag the
+// YouTubeChannel row so the dashboard can prompt for re-auth.
+function looksLikeAuthError(msg: string): boolean {
+  const m = msg.toLowerCase();
+  return (
+    m.includes("invalid_grant") ||
+    m.includes("token has been expired or revoked") ||
+    m.includes("invalid credentials") ||
+    m.includes("unauthorized_client") ||
+    m.includes("401")
+  );
 }
