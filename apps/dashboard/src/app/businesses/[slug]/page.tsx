@@ -60,6 +60,8 @@ export default async function BusinessDetail({
   });
 
   const okMsg = searchParams?.ok ? OK_MESSAGES[searchParams.ok] : null;
+  const okNote = searchParams?.note ? decodeURIComponent(String(searchParams.note)) : null;
+  const testErr = searchParams?.testErr ? decodeURIComponent(String(searchParams.testErr)) : null;
   const editPlanId = searchParams?.editPlan ?? null;
   const editTopicId = searchParams?.editTopic ?? null;
   const editIntId = searchParams?.editInt ?? null;
@@ -260,52 +262,71 @@ export default async function BusinessDetail({
   // verify the pipeline end-to-end before turning on the scheduled flow.
   async function runShortVideoTestNow() {
     "use server";
-    const business = await prisma.business.findUniqueOrThrow({ where: { slug: params.slug } });
-    const plan = await prisma.shortVideoPlan.findUnique({ where: { businessId: business.id } });
-    if (!plan?.youtubeChannelRowId) {
-      redirect(`/businesses/${params.slug}?ok=shortVideoTestNoChannel`);
-    }
-    // Pick the most recent published blog for this business.
-    const blog = await prisma.contentItem.findFirst({
-      where: { businessId: business.id, type: "blog", status: "published" },
-      orderBy: { publishedAt: "desc" },
-    });
-    if (!blog) {
-      redirect(`/businesses/${params.slug}?ok=shortVideoTestNoBlog`);
-    }
-    // Reuse an existing script if there is one for this blog (avoids burning
-    // Claude tokens on duplicate generation). Otherwise enqueue script
-    // generation, then wait for the worker to produce one.
-    let script = await prisma.shortVideoScript.findFirst({
-      where: { contentItemId: blog!.id },
-      orderBy: { ord: "asc" },
-    });
-    if (!script) {
-      await queue(QUEUES.shortvideo_scripts).add(
-        `scripts:${blog!.id}:test`,
-        { contentItemId: blog!.id },
+    // Two-phase try/catch so we can distinguish redirect() (which throws
+    // a Next-internal NEXT_REDIRECT we MUST rethrow) from real errors
+    // we want to surface in a banner.
+    try {
+      const business = await prisma.business.findUniqueOrThrow({ where: { slug: params.slug } });
+      const plan = await prisma.shortVideoPlan.findUnique({ where: { businessId: business.id } });
+      if (!plan?.youtubeChannelRowId) {
+        redirect(`/businesses/${params.slug}?ok=shortVideoTestNoChannel`);
+      }
+      // Pick the most recent published blog for this business.
+      const blog = await prisma.contentItem.findFirst({
+        where: { businessId: business.id, type: "blog", status: "published" },
+        orderBy: { publishedAt: "desc" },
+      });
+      if (!blog) {
+        redirect(`/businesses/${params.slug}?ok=shortVideoTestNoBlog`);
+      }
+      // Reuse an existing script if there is one for this blog (avoids burning
+      // Claude tokens on duplicate generation). Otherwise enqueue script
+      // generation, then wait for the worker to produce one.
+      const script = await prisma.shortVideoScript.findFirst({
+        where: { contentItemId: blog!.id },
+        orderBy: { ord: "asc" },
+      });
+      if (!script) {
+        await queue(QUEUES.shortvideo_scripts).add(
+          `scripts:${blog!.id}:test`,
+          { contentItemId: blog!.id },
+        );
+        // We can't synchronously wait for the script gen here (server actions
+        // shouldn't block on a worker). Tell the admin to click again after
+        // ~30s, by which point the script will exist.
+        redirect(
+          `/businesses/${params.slug}?ok=shortVideoTestStarted&note=${encodeURIComponent(
+            `Script being generated for blog "${blog!.title}" (id ${blog!.id}). Wait ~30s then click Test again to render+publish it. Or open /content/${blog!.id}/shorts to watch.`,
+          )}`,
+        );
+      }
+      // Flip the script to approved (skipping human review) and enqueue
+      // render with testMode=true. The render step bypasses the off-hours
+      // window and the publish step uploads UNLISTED with no schedule.
+      await prisma.shortVideoScript.update({
+        where: { id: script.id },
+        data: { status: "approved", reviewNotes: "Queued via Test Now button — will upload as unlisted." },
+      });
+      await queue(QUEUES.shortvideo_render).add(
+        `render:${script.id}:test`,
+        { scriptId: script.id, testMode: true },
       );
-      // We can't synchronously wait for the script gen here (server actions
-      // shouldn't block on a worker). Tell the admin to click again after
-      // ~30s, by which point the script will exist.
+      redirect(`/content/${blog!.id}/shorts?ok=shortVideoTestStarted`);
+    } catch (err) {
+      // next/navigation's redirect() throws an error with a `digest`
+      // property starting with "NEXT_REDIRECT;" that Next catches at the
+      // route layer. We MUST rethrow it or the redirect dies silently.
+      const digest = (err as { digest?: unknown })?.digest;
+      if (typeof digest === "string" && digest.startsWith("NEXT_REDIRECT")) throw err;
+      // Anything else is a real error — surface it as a banner so the
+      // admin can see WHY the test didn't run.
+      const msg = err instanceof Error ? err.message : String(err);
+      // eslint-disable-next-line no-console
+      console.error("[shortvideo-test-now] failed:", err);
       redirect(
-        `/businesses/${params.slug}?ok=shortVideoTestStarted&note=${encodeURIComponent(
-          "Script being generated — wait ~30s, then click Test again to render+publish it.",
-        )}`,
+        `/businesses/${params.slug}?testErr=${encodeURIComponent(msg.slice(0, 500))}`,
       );
     }
-    // Flip the script to approved (skipping human review) and enqueue
-    // render with testMode=true. The render step bypasses the off-hours
-    // window and the publish step uploads UNLISTED with no schedule.
-    await prisma.shortVideoScript.update({
-      where: { id: script!.id },
-      data: { status: "approved", reviewNotes: "Queued via Test Now button — will upload as unlisted." },
-    });
-    await queue(QUEUES.shortvideo_render).add(
-      `render:${script!.id}:test`,
-      { scriptId: script!.id, testMode: true },
-    );
-    redirect(`/content/${blog!.id}/shorts?ok=shortVideoTestStarted`);
   }
 
   async function runResearchNow() {
@@ -341,6 +362,18 @@ export default async function BusinessDetail({
         {okMsg && (
           <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-800">
             {okMsg}
+            {okNote && <div className="text-xs text-green-700 mt-1 whitespace-pre-wrap">{okNote}</div>}
+          </div>
+        )}
+        {testErr && (
+          <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+            <b>Test-now failed:</b>
+            <div className="text-xs mt-1 whitespace-pre-wrap break-words">{testErr}</div>
+            <div className="text-[11px] text-red-600 mt-2">
+              Common causes: Redis unreachable from the dashboard container,
+              the latest blog has no body content yet, or
+              ANTHROPIC_API_KEY missing in the worker env.
+            </div>
           </div>
         )}
 
