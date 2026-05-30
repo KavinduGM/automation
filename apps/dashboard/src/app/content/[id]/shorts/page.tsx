@@ -280,7 +280,7 @@ export default async function ShortsReviewPage({
                   <div className="flex items-baseline justify-between gap-2">
                     <div>
                       <span className="font-mono text-xs text-gray-600">{e.step}</span>
-                      <span className={`ml-2 text-xs ${stateTone(e.state)}`}>{e.state}</span>
+                      <span className={`ml-2 text-xs ${stateTone(e.status)}`}>{e.status}</span>
                       {e.label && <span className="ml-2 text-gray-700">{e.label}</span>}
                     </div>
                     <div className="text-xs text-gray-500 whitespace-nowrap">
@@ -289,7 +289,7 @@ export default async function ShortsReviewPage({
                     </div>
                   </div>
                   {e.message && (
-                    <div className={`text-xs mt-1 whitespace-pre-wrap ${e.state === "failed" ? "text-red-700" : "text-gray-600"}`}>
+                    <div className={`text-xs mt-1 whitespace-pre-wrap ${e.status === "failed" ? "text-red-700" : "text-gray-600"}`}>
                       {e.message}
                     </div>
                   )}
