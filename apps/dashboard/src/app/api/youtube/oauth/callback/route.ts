@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma, seal } from "@ca/shared";
+import { prisma, seal, env } from "@ca/shared";
 import { exchangeCode, listMyChannels, YOUTUBE_SCOPES } from "@ca/providers";
 
 // OAuth callback. Validates the state nonce, exchanges the code for tokens,
@@ -99,7 +99,12 @@ export async function GET(req: NextRequest) {
   return res;
 }
 
-function redirectBack(req: NextRequest, path: string): string {
-  const origin = new URL(req.url).origin;
+function redirectBack(_req: NextRequest, path: string): string {
+  // Use DASHBOARD_URL (the configured public origin) rather than req.url.
+  // Behind Dokploy's Traefik proxy, req.url resolves to the container's
+  // internal `localhost:3000`, which the browser cannot reach. Forwarded
+  // headers (X-Forwarded-Host etc.) are not always trustworthy either, so
+  // we just use the canonical public URL from env.
+  const origin = env().DASHBOARD_URL.replace(/\/$/, "");
   return `${origin}${path}`;
 }
