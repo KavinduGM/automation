@@ -1,5 +1,5 @@
 import { prisma, env, logger, open } from "@ca/shared";
-import { uploadVideo, setThumbnail, ytCreateItem, ytBuildExpectedFilename } from "@ca/providers";
+import { uploadVideo, ytCreateItem, ytBuildExpectedFilename } from "@ca/providers";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -7,7 +7,7 @@ import path from "node:path";
 //
 //   A. NATIVE (recommended) — plan.youtubeChannelRowId is set.
 //      Read the encrypted refresh token, upload via YouTube Data API v3
-//      with scheduled publishAt, set custom thumbnail, store videoId.
+//      with scheduled publishAt, store videoId.
 //      Replaces the previous Drive-drop + YT Automation hop entirely.
 //
 //   B. LEGACY — plan.ytChannelPrefix + plan.ytChannelId are set (and the
@@ -15,6 +15,11 @@ import path from "node:path";
 //      folder + creates a ContentItem in the YT Automation system.
 //      Kept for the OAP/OAG/NUR education channels that still use the
 //      original tool.
+//
+// Thumbnails: intentionally NOT generated or uploaded for shorts. YouTube
+// auto-creates a thumbnail from the first frame, and Shorts on most channels
+// don't honor custom thumbnails anyway. When the long-video pipeline lands
+// we'll add brand-templated thumbnail generation + upload there.
 
 export async function runShortVideoPublish(scriptId: string): Promise<void> {
   const row = await prisma.shortVideoScript.findUnique({ where: { id: scriptId } });
@@ -37,12 +42,9 @@ export async function runShortVideoPublish(scriptId: string): Promise<void> {
     return;
   }
 
-  // Resolve absolute paths to the rendered files.
+  // Resolve absolute path to the rendered video.
   const assetsDir = env().ASSETS_DIR;
   const videoAbs = path.isAbsolute(row.videoPath) ? row.videoPath : path.join(assetsDir, row.videoPath);
-  const thumbAbs = row.thumbnailPath
-    ? (path.isAbsolute(row.thumbnailPath) ? row.thumbnailPath : path.join(assetsDir, row.thumbnailPath))
-    : null;
 
   // Sanity: file must exist before we tell YouTube about it.
   try {
@@ -56,13 +58,13 @@ export async function runShortVideoPublish(scriptId: string): Promise<void> {
 
   // ── Path A: NATIVE YouTube upload ─────────────────────────────────────
   if (plan.youtubeChannelRowId) {
-    await publishNative({ scriptId, row, plan, videoAbs, thumbAbs });
+    await publishNative({ scriptId, row, plan, videoAbs });
     return;
   }
 
   // ── Path B: LEGACY YT Automation handoff ──────────────────────────────
   if (plan.ytChannelPrefix && plan.ytChannelId) {
-    await publishLegacy({ scriptId, row, plan, videoAbs, thumbAbs });
+    await publishLegacy({ scriptId, row, plan, videoAbs });
     return;
   }
 
@@ -77,9 +79,8 @@ async function publishNative(args: {
   row: Awaited<ReturnType<typeof prisma.shortVideoScript.findUnique>>;
   plan: Awaited<ReturnType<typeof prisma.shortVideoPlan.findUnique>>;
   videoAbs: string;
-  thumbAbs: string | null;
 }): Promise<void> {
-  const { scriptId, row, plan, videoAbs, thumbAbs } = args;
+  const { scriptId, row, plan, videoAbs } = args;
   if (!row || !plan?.youtubeChannelRowId) return;
 
   const ch = await prisma.youTubeChannel.findUnique({ where: { id: plan.youtubeChannelRowId } });
@@ -119,26 +120,15 @@ async function publishNative(args: {
     });
     logger.info({ scriptId, videoId: upload.videoId, publishAt: upload.publishAt }, "shortvideo.publish.native_uploaded");
 
-    // Try to set a custom thumbnail — non-fatal on failure (shorts can
-    // refuse custom thumbs on new channels; YouTube auto-generates one
-    // from the first frame as a fallback).
-    let thumbNote = "";
-    if (thumbAbs) {
-      try {
-        await fs.access(thumbAbs);
-        const r = await setThumbnail({ refreshToken, videoId: upload.videoId, thumbnailFilePath: thumbAbs });
-        if (!r.ok) thumbNote = `Thumbnail upload skipped: ${r.message ?? "unknown"}`;
-      } catch (err) {
-        thumbNote = `Thumbnail not uploaded: ${(err as Error).message}`;
-      }
-    }
+    // Shorts: no custom thumbnail uploaded — YouTube auto-generates one
+    // from the first frame. (Long-video pipeline will set custom thumbs.)
 
     await prisma.shortVideoScript.update({
       where: { id: scriptId },
       data: {
         status: "scheduled",
         ytItemId: upload.videoId,    // reuse this column to store YouTube videoId for native path
-        reviewNotes: thumbNote,
+        reviewNotes: "",
       },
     });
     // Update the channel's lastRefreshedAt — successful upload implies the
@@ -169,9 +159,8 @@ async function publishLegacy(args: {
   row: NonNullable<Awaited<ReturnType<typeof prisma.shortVideoScript.findUnique>>>;
   plan: NonNullable<Awaited<ReturnType<typeof prisma.shortVideoPlan.findUnique>>>;
   videoAbs: string;
-  thumbAbs: string | null;
 }): Promise<void> {
-  const { scriptId, row, plan, videoAbs, thumbAbs } = args;
+  const { scriptId, row, plan, videoAbs } = args;
   const scheduledAt = row.scheduledPublishAt ?? new Date(Date.now() + 24 * 60 * 60 * 1000);
   const expectedFilename = ytBuildExpectedFilename({
     prefix: plan.ytChannelPrefix!,
@@ -180,7 +169,6 @@ async function publishLegacy(args: {
     slot: row.ord,
     ext: "mp4",
   });
-  const expectedThumb = expectedFilename.replace(/\.mp4$/, ".jpg");
 
   const dropDir = process.env.YT_DRIVE_DROP_DIR;
   if (dropDir) {
@@ -188,9 +176,7 @@ async function publishLegacy(args: {
       const target = path.join(dropDir, plan.ytChannelPrefix!);
       await fs.mkdir(target, { recursive: true });
       await fs.copyFile(videoAbs, path.join(target, expectedFilename));
-      if (thumbAbs) {
-        try { await fs.copyFile(thumbAbs, path.join(target, expectedThumb)); } catch { /* non-fatal */ }
-      }
+      // Shorts: no thumbnail copied — YouTube auto-generates from first frame.
     } catch (err) {
       await markFailed(scriptId, `Drop to drive folder failed: ${(err as Error).message}`);
       return;

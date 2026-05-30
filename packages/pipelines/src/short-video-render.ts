@@ -12,7 +12,7 @@ import { prisma, env, logger, queue, QUEUES } from "@ca/shared";
 interface RenderResponse {
   ok: boolean;
   videoPath?: string;          // relative to ASSETS_DIR
-  thumbnailPath?: string | null;
+  thumbnailPath?: string | null;  // always null for shorts — YouTube auto-generates from first frame
   totalDurationSeconds?: number;
   costUsdBreakdown?: { tts: number; claudeHtml: number; visualReview: number; total: number };
   sceneNotes?: string[];
@@ -99,7 +99,7 @@ export async function runShortVideoRender(scriptId: string): Promise<void> {
       data: {
         status: "rendered",
         videoPath: json.videoPath,
-        thumbnailPath: json.thumbnailPath ?? null,
+        thumbnailPath: null,            // shorts: no custom thumbnail (YouTube uses first frame)
         costUsd: { increment: json.costUsdBreakdown?.total ?? 0 },
         reviewNotes:
           (json.sceneNotes ?? []).length > 0

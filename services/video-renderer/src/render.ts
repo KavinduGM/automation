@@ -43,7 +43,7 @@ export interface RenderJobInput {
 
 export interface RenderJobOutput {
   videoPath: string
-  thumbnailPath: string
+  thumbnailPath: string | null
   totalDurationSeconds: number
   costUsdBreakdown: {
     tts: number
@@ -205,23 +205,14 @@ export async function renderScript(input: RenderJobInput): Promise<RenderJobOutp
     height,
   })
 
-  // 7. Thumbnail — frame at 0.5s of the first scene
-  const thumbnailPath = path.join(work, `${input.spec.video_name}.jpg`)
-  try {
-    await extractFrame({
-      videoIn: sceneFiles[0]!.finalSceneMp4,
-      atSeconds: 0.5,
-      out: thumbnailPath,
-      quality: 2,
-    })
-  } catch {
-    /* thumbnail is non-fatal */
-  }
+  // NOTE: thumbnail generation is intentionally skipped for shorts.
+  // YouTube auto-generates a thumbnail from the first frame for Shorts.
+  // We'll add thumbnail generation when the long-video pipeline lands.
 
   const total = sceneFiles.reduce((s, x) => s + x.durationSeconds, 0)
   return {
     videoPath: outputMp4,
-    thumbnailPath,
+    thumbnailPath: null,
     totalDurationSeconds: total,
     costUsdBreakdown: {
       tts: ttsCostUsd,

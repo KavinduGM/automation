@@ -100,14 +100,17 @@ app.post('/render', async (request, reply) => {
     const relVideo = result.videoPath.startsWith(ASSETS_DIR)
       ? result.videoPath.slice(ASSETS_DIR.length).replace(/^\/+/, '')
       : result.videoPath
-    const relThumb = result.thumbnailPath.startsWith(ASSETS_DIR)
+    // Thumbnail is intentionally null for shorts (YouTube auto-generates
+    // from first frame). The field is kept in the response shape so the
+    // long-video pipeline can populate it later without a contract change.
+    const relThumb = result.thumbnailPath && result.thumbnailPath.startsWith(ASSETS_DIR)
       ? result.thumbnailPath.slice(ASSETS_DIR.length).replace(/^\/+/, '')
       : result.thumbnailPath
 
     return {
       ok: true,
       videoPath: relVideo,
-      thumbnailPath: fs.existsSync(result.thumbnailPath) ? relThumb : null,
+      thumbnailPath: result.thumbnailPath && fs.existsSync(result.thumbnailPath) ? relThumb : null,
       totalDurationSeconds: result.totalDurationSeconds,
       costUsdBreakdown: result.costUsdBreakdown,
       sceneNotes: result.perSceneLogs,
