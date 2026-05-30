@@ -79,8 +79,9 @@ export async function runShortVideoRender(
     return;
   }
 
+  let res: Response;
   try {
-    const res = await fetch(`${RENDERER_URL}/render`, {
+    res = await fetch(`${RENDERER_URL}/render`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -93,10 +94,23 @@ export async function runShortVideoRender(
         visualReviewMaxAttempts: 2,
       }),
     });
-
+  } catch (err) {
+    // The bare Node fetch error is "fetch failed" — completely opaque.
+    // Wrap with the URL we tried + a hint so the dashboard error message
+    // is actually useful.
+    const cause = (err as { cause?: { code?: string; message?: string } })?.cause;
+    const code = cause?.code ?? "";
+    const msg =
+      `Could not reach video-renderer at ${RENDERER_URL}/render — ${(err as Error).message}` +
+      (code ? ` (cause: ${code})` : "") +
+      `. Check that the video-renderer container is running (Dokploy → services → video-renderer → Logs).` +
+      ` If RENDERER_AUTH_TOKEN is set, make sure both worker and video-renderer have the same value.`;
+    throw new Error(msg);
+  }
+  try {
     const json = (await res.json()) as RenderResponse;
     if (!res.ok || !json.ok || !json.videoPath) {
-      throw new Error(json.error ?? `renderer returned ${res.status}`);
+      throw new Error(json.error ?? `renderer returned HTTP ${res.status}`);
     }
 
     await prisma.shortVideoScript.update({
